@@ -78,20 +78,13 @@ impl AtomSet {
         self.sorted_vec.binary_search(&atom).is_ok()
     }
     fn set_minus_iter<'a, 'b: 'a>(&'a self, other: &'b Self) -> impl Iterator<Item = Atom> + 'a {
-        self.sorted_vec
-            .iter()
-            .copied()
-            .filter(|&atom| !other.contains(atom))
+        self.sorted_vec.iter().copied().filter(|&atom| !other.contains(atom))
     }
 }
 
 impl Default for Kb {
     fn default() -> Self {
-        Self {
-            pos: Default::default(),
-            prev_pos: None,
-            prev_prev_pos: None,
-        }
+        Self { pos: Default::default(), prev_pos: None, prev_prev_pos: None }
     }
 }
 impl Kb {
@@ -134,25 +127,12 @@ impl Kb {
 
 fn main() {
     let rules = vec![
-        Rule {
-            head: Atom('p'),
-            body: vec![Literal::neg(Atom('q'))],
-        },
-        Rule {
-            head: Atom('q'),
-            body: vec![Literal::neg(Atom('p'))],
-        },
-        Rule {
-            head: Atom('q'),
-            body: vec![],
-        },
+        Rule { head: Atom('p'), body: vec![Literal::neg(Atom('q'))] },
+        Rule { head: Atom('q'), body: vec![Literal::neg(Atom('p'))] },
+        Rule { head: Atom('q'), body: vec![] },
     ];
 
-    let mut kb = Kb {
-        pos: Default::default(),
-        prev_pos: None,
-        prev_prev_pos: None,
-    };
+    let mut kb = Kb { pos: Default::default(), prev_pos: None, prev_prev_pos: None };
     let start = std::time::Instant::now();
     let mut iterations_taken = 0;
     for i in 0.. {
