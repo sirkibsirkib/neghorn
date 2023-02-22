@@ -5,6 +5,26 @@ pub(crate) struct ChunkArena {
   pub(crate) data: Vec<u8>,
   chunk_bytes: usize,
 }
+pub(crate) struct ChunkIter<'a> {
+  ca: &'a ChunkArena,
+  next_index: usize,
+}
+
+////////////
+impl ChunkIter<'_> {
+  pub(crate) fn has_next(&self) -> bool {
+    self.ca.get_index(self.next_index).is_some()
+  }
+}
+impl<'a> Iterator for ChunkIter<'a> {
+  type Item = &'a [u8];
+  fn next(&mut self) -> Option<Self::Item> {
+    let res = self.ca.get_index(self.next_index)?;
+    self.next_index += 1;
+    Some(res)
+  }
+}
+
 impl ChunkArena {
   pub fn new(chunk_bytes: usize) -> Self {
     Self { data: Default::default(), chunk_bytes }
@@ -63,6 +83,9 @@ impl ChunkArena {
       println!("lmr' {:?}", [l, m, r]);
     }
     return (l, false);
+  }
+  pub fn iter(&self) -> ChunkIter {
+    ChunkIter { ca: self, next_index: 0 }
   }
 }
 
