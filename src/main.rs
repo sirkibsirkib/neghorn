@@ -127,9 +127,10 @@ impl Kb {
 
 fn main() {
     let rules = vec![
-        Rule { head: Atom('p'), body: vec![Literal::neg(Atom('q'))] },
-        Rule { head: Atom('q'), body: vec![Literal::neg(Atom('p'))] },
-        Rule { head: Atom('q'), body: vec![] },
+        Rule { head: Atom('T'), body: vec![Literal::pos(Atom('t'))] }, //whee
+        Rule { head: Atom('V'), body: vec![Literal::pos(Atom('h')), Literal::neg(Atom('T'))] },
+        Rule { head: Atom('h'), body: vec![] },
+        // Rule { head: Atom('t'), body: vec![] },
     ];
 
     let mut kb = Kb { pos: Default::default(), prev_pos: None, prev_prev_pos: None };
