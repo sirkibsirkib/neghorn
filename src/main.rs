@@ -1,5 +1,5 @@
 #[derive(Default, Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
-struct Atom(char);
+struct Atom(&'static str);
 
 #[derive(Default, Eq, PartialEq)]
 struct AtomSet {
@@ -127,11 +127,28 @@ impl Kb {
 
 fn main() {
     let rules = vec![
-        Rule { head: Atom('T'), body: vec![Literal::pos(Atom('t'))] }, //whee
-        Rule { head: Atom('V'), body: vec![Literal::pos(Atom('h')), Literal::neg(Atom('T'))] },
-        Rule { head: Atom('h'), body: vec![] },
-        // Rule { head: Atom('t'), body: vec![] },
+        Rule {
+            head: Atom("other_role_in(amy,r1,a)"),
+            body: vec![Literal::pos(Atom("role_in(bob,r1,a)"))],
+        }, //whee
+        Rule {
+            head: Atom("role_in(amy,r1,a)"),
+            body: vec![
+                Literal::pos(Atom("role_in(amy,r2,a)")),
+                Literal::neg(Atom("other_role_in(amy,r1,a)")),
+            ],
+        }, //whee
+        Rule { head: Atom("role_in(amy,r2,a)"), body: vec![] }, //whee
+        Rule { head: Atom("role_in(bob,r1,a)"), body: vec![] }, //whee
     ];
+
+    // //
+    // let rules = vec![
+    //     Rule { head: Atom('T'), body: vec![Literal::pos(Atom('t'))] }, //whee
+    //     Rule { head: Atom('V'), body: vec![Literal::pos(Atom('h')), Literal::neg(Atom('T'))] },
+    //     Rule { head: Atom('h'), body: vec![] },
+    //     // Rule { head: Atom('t'), body: vec![] },
+    // ];
 
     let mut kb = Kb { pos: Default::default(), prev_pos: None, prev_prev_pos: None };
     let start = std::time::Instant::now();
