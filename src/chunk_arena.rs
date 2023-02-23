@@ -1,3 +1,4 @@
+use crate::chunk_cmp;
 use core::cmp::Ordering;
 
 #[derive(Debug)]
@@ -142,14 +143,4 @@ impl ChunkArena {
     // pub fn iter(&self) -> ChunkIter {
     //     ChunkIter { ca: self, next_index: 0 }
     // }
-}
-
-fn chunk_cmp(a: &[u8], b: &[u8]) -> Ordering {
-    for (a, b) in a.iter().zip(b.iter()) {
-        match a.cmp(b) {
-            Ordering::Equal => {}
-            o => return o,
-        }
-    }
-    Ordering::Equal
 }

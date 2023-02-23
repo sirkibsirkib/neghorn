@@ -1,3 +1,4 @@
+use core::cmp::Ordering;
 use core::ops::Range;
 use maplit::hashmap;
 use std::collections::HashMap;
@@ -50,22 +51,25 @@ enum TidSizeErr {
     DependsOnSizeOfUnknown(TypeId),
 }
 
-enum EqCheckKind {
+enum CmpKind {
+    Leq,
+    Lt,
     Eq,
     Neq,
 }
+#[derive(Debug, Clone, Copy)]
 struct VarIdx(u8);
+
+#[derive(Debug, Clone)]
 struct VarFrag {
     var_idx: VarIdx,
-    bytes: Range<u16>,
+    var_bytes: Range<u16>,
 }
-struct EqCheck {
-    kind: EqCheckKind,
-    a: VarIdx,
-    b: VarIdx,
-    a_byte_offset: u16,
-    b_byte_offset: u16,
-    byte_len: u16,
+struct VarFragCmpCheck {
+    // assumes ranges are in bounds AND same length
+    frag_a: VarFrag,
+    frag_b: VarFrag,
+    cmp_kind: CmpKind,
 }
 struct ReturnInfo {
     built_range: Range<u16>,
@@ -73,9 +77,9 @@ struct ReturnInfo {
 }
 struct StateRule {
     var_types: Vec<TypeId>, // will consider all quantifications
-    eq_checks: Vec<EqCheck>,
+    var_frag_cmp_checks: Vec<VarFragCmpCheck>,
     return_tid: TypeId,
-    return_frags: Vec<VarFrag>,
+    return_var_frags: Vec<VarFrag>,
 }
 struct State {
     state_rules: Vec<StateRule>,
@@ -84,13 +88,49 @@ struct State {
 
 ////////////////////////////
 
+fn chunk_cmp(a: &[u8], b: &[u8]) -> Ordering {
+    for (a, b) in a.iter().zip(b.iter()) {
+        match a.cmp(b) {
+            Ordering::Equal => {}
+            o => return o,
+        }
+    }
+    Ordering::Equal
+}
+
+impl VarFrag {
+    fn get_slice<'a>(self, var_chunks: &'a [&'a [u8]]) -> &'a [u8] {
+        // assumes in bounds!
+        &var_chunks[self.var_idx.0 as usize]
+            [self.var_bytes.start as usize..self.var_bytes.end as usize]
+    }
+}
 impl State {
     fn generate_all(&mut self) {
+        let mut result_buf: Vec<u8> = vec![];
         for state_rule in self.state_rules.iter() {
-            let mut chunk_combo =
+            let mut var_arenas_combo =
                 ChunkCombo::new(state_rule.var_types.iter().map(|tid| self.pos.get(tid).unwrap()));
-            while let Some(chunk_slice) = chunk_combo.next() {
-                println!("$  {:?}\n", chunk_slice);
+            'combo: while let Some(var_chunks) = var_arenas_combo.next() {
+                for check in state_rule.var_frag_cmp_checks.iter() {
+                    let slice_a = check.frag_a.clone().get_slice(var_chunks);
+                    let slice_b = check.frag_b.clone().get_slice(var_chunks);
+                    let pass = match check.cmp_kind {
+                        CmpKind::Eq => slice_a == slice_b,
+                        CmpKind::Neq => slice_a != slice_b,
+                        CmpKind::Lt => chunk_cmp(slice_a, slice_b) == Ordering::Less,
+                        CmpKind::Leq => chunk_cmp(slice_a, slice_b) != Ordering::Greater,
+                    };
+                    if !pass {
+                        continue 'combo;
+                    }
+                }
+
+                for frag in state_rule.return_var_frags.iter() {
+                    result_buf.extend(frag.clone().get_slice(var_chunks));
+                }
+                println!("RES {:?}", result_buf);
+                result_buf.clear();
             }
         }
     }
@@ -196,14 +236,25 @@ fn main() {
         state_rules: vec![
             StateRule {
                 var_types: vec![TypeId(0), TypeId(1)],
-                eq_checks: vec![],
+                var_frag_cmp_checks: vec![
+                    VarFragCmpCheck {
+                        frag_a: VarFrag { var_idx: VarIdx(1), var_bytes: 0..1 },
+                        frag_b: VarFrag { var_idx: VarIdx(0), var_bytes: 0..1 },
+                        cmp_kind: CmpKind::Leq,
+                    }, // whee
+                ],
                 return_tid: TypeId(2),
-                return_frags: vec![],
+                return_var_frags: vec![
+                    VarFrag { var_idx: VarIdx(0), var_bytes: 0..1 }, //whee
+                    VarFrag { var_idx: VarIdx(0), var_bytes: 0..1 }, //whee
+                    VarFrag { var_idx: VarIdx(1), var_bytes: 0..1 }, //whee
+                    VarFrag { var_idx: VarIdx(1), var_bytes: 0..1 }, //whee
+                ],
             }, //whee
         ],
         pos: hashmap! {
-            TypeId(0) => ChunkArena::from_slice([[10], [11], [12]].iter()),
-            TypeId(1) => ChunkArena::from_slice([[20], [21], [22]].iter()),
+            TypeId(0) => ChunkArena::from_slice([[1], [2], [3]].iter()),
+            TypeId(1) => ChunkArena::from_slice([[2], [3], [4]].iter()),
         },
     };
     println!("{:#?}", &state.pos);
