@@ -2,8 +2,16 @@ use super::*;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 struct TypeId(u32);
+
+#[derive(Debug)]
+struct TypeDef {
+    label: &'static str,
+    fields: Vec<TypeId>,
+}
+
+#[derive(Debug)]
 struct TypeInfo {
-    type_fields: HashMap<TypeId, Vec<TypeId>>,
+    type_defs: HashMap<TypeId, TypeDef>,
     type_size: HashMap<TypeId, usize>, // sum of all
 }
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -64,30 +72,57 @@ struct State {
     prev_pos: Option<HashMap<TypeId, ChunkArena>>,
     prev_prev_pos: Option<HashMap<TypeId, ChunkArena>>,
     const_bytes: Vec<u8>,
+    type_info: TypeInfo,
 }
 struct PrintableStateInterpretation<'a>(&'a State);
 
 /////////////////
-
+impl TypeId {
+    const U8: Self = Self(0);
+    const U4: Self = Self(1);
+    const I4: Self = Self(2);
+    const fn const_size(self) -> Option<usize> {
+        Some(match self {
+            Self::U8 => 1,
+            Self::U4 | Self::I4 => 4,
+            _ => return None,
+        })
+    }
+}
 impl TypeInfo {
-    const INT_TID: TypeId = TypeId(0);
-    fn compute_size_of(&self, tid: TypeId, depth_to_go: u8) -> Result<usize, TidSizeErr> {
-        match tid {
-            Self::INT_TID => Ok(std::mem::size_of::<u32>()),
-            _ => {
-                if depth_to_go == 0 {
-                    Err(TidSizeErr::RecursiveDepthExceeded)
-                } else {
-                    let fields = self
-                        .type_fields
-                        .get(&tid)
-                        .ok_or(TidSizeErr::DependsOnSizeOfUnknown(tid))?;
-                    fields.iter().fold(Ok(0), |acc, &field| {
-                        Ok(acc? + self.compute_size_of(field, depth_to_go - 1)?)
-                    })
-                }
+    fn new(type_defs: HashMap<TypeId, TypeDef>) -> Result<Self, ()> {
+        let mut size_todo: HashSet<TypeId> = type_defs.keys().copied().collect();
+        let mut type_size: HashMap<TypeId, usize> = Default::default();
+
+        // invariant: type_size.keys() disjoint with size_todo.
+        const MAX_DEPTH: u8 = 100;
+
+        'arb: while let Some(mut tid) = size_todo.iter().copied().next() {
+            'tid_compute: for _ in 0..MAX_DEPTH {
+                assert!(tid.const_size().is_none());
+                let def = type_defs.get(&tid).ok_or(())?;
+                let r: Result<usize, TypeId> = def.fields.iter().fold(Ok(0), |acc, field| {
+                    Ok(acc?
+                        + field
+                            .const_size()
+                            .or_else(|| type_size.get(field).copied())
+                            .ok_or(*field)?)
+                });
+                match r {
+                    Ok(size) => {
+                        size_todo.remove(&tid);
+                        type_size.insert(tid, size);
+                        continue 'arb;
+                    }
+                    Err(field) => {
+                        tid = field;
+                        continue 'tid_compute;
+                    }
+                };
             }
+            return Err(());
         }
+        Ok(Self { type_defs, type_size })
     }
 }
 
@@ -231,7 +266,14 @@ impl std::fmt::Debug for PrintableStateInterpretation<'_> {
 }
 
 pub(crate) fn test() {
+    let type_info = TypeInfo::new(hashmap! {
+        TypeId(5) => TypeDef { label: "person", fields: vec![TypeId::U8], }
+    })
+    .expect("weh");
+    println!("{:#?}", &type_info);
+    return;
     let mut state = State {
+        type_info,
         state_rules: vec![
             StateRule {
                 var_types: vec![TypeId(0), TypeId(1)],

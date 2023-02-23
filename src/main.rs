@@ -1,11 +1,11 @@
 use core::cmp::Ordering;
 use core::ops::Range;
 use maplit::hashmap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 mod chunk_arena;
-mod old_kb;
-mod program;
+// mod old_kb;
+// mod program;
 mod state;
 
 use chunk_arena::{ChunkArena, ChunkCombo};
