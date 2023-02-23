@@ -14,14 +14,20 @@ pub(crate) struct ChunkIter<'a> {
 
 #[derive(Debug)]
 pub(crate) struct ChunkCombo<'a> {
-    // invariant: indices in range
+    // slots.next_chunk_index trails behind chunks if they exist
     slots: Vec<ChunkSlot<'a>>,
     chunks: Vec<&'a [u8]>,
+    ever_returned: bool,
 }
 #[derive(Debug)]
 struct ChunkSlot<'a> {
     next_chunk_index: usize, // next chunk to read to fill ChunkCombo::chunks
     arena: &'a ChunkArena,
+}
+#[derive(Debug, Copy, Clone)]
+pub(crate) struct WrongSize {
+    given: usize,
+    expected: usize,
 }
 ////////////
 impl<'a> Iterator for ChunkIter<'a> {
@@ -35,25 +41,13 @@ impl<'a> Iterator for ChunkIter<'a> {
 impl<'a> ChunkCombo<'a> {
     pub(crate) fn new(arenas: impl Iterator<Item = &'a ChunkArena>) -> Self {
         Self {
+            ever_returned: false,
             chunks: Default::default(),
             slots: arenas.map(|arena| ChunkSlot { next_chunk_index: 0, arena }).collect(),
         }
     }
-}
-impl<'a> ChunkCombo<'a> {
-    pub(crate) fn next(&mut self) -> Option<&[&[u8]]> {
-        // chunks are either EMPTY (first iteration) or FULL (otherwise)
-
-        // advance to the next combination by incrmenting last slot by 1.
-        // BEFORE: slot_next_indices:[X,Y] chunks:[chunk(arena0,X-1),chunk(arena1,Y-1)]
-        // AFTER : slot_next_indices:[X,Y] chunks:[chunk(arena0,X-1)]
-        self.chunks.pop(); // no effect if EMPTY already :) perfect.
+    fn try_fill_chunks(&mut self) {
         'outer: loop {
-            if self.slots.is_empty() {
-                // that's the signal for being done!
-                return None;
-            }
-
             // BEFORE: slot_next_indices:[X,Y]   chunks:[chunk(arena0,X-1)]
             // AFTER : slot_next_indices:[X,Y+1] chunks:[chunk(arena0,X-1),chunk(arena1,Y)]
             for (i, slot) in self.slots[self.chunks.len()..].iter_mut().enumerate() {
@@ -72,15 +66,29 @@ impl<'a> ChunkCombo<'a> {
                     if self.chunks.pop().is_none() {
                         // case of chunks==[] before! (trying to set chunk len to -1).
                         // instead, mark STOP condition: slots := chunks := [].
-                        self.slots.clear();
-                        self.chunks.clear();
+                        return;
                     }
                     continue 'outer;
                 }
             }
-            break 'outer; // ok!
+            assert_eq!(self.chunks.len(), self.slots.len());
+            return; // ok! ch
         }
+    }
+}
+impl<'a> ChunkCombo<'a> {
+    pub(crate) fn next(&mut self) -> Option<&[&[u8]]> {
+        self.chunks.pop();
+        // advance to the next combination by incrmenting last slot by 1.
+        // BEFORE: slot_next_indices:[X,Y] chunks:[chunk(arena0,X-1),chunk(arena1,Y-1)]
+        // AFTER : slot_next_indices:[X,Y] chunks:[chunk(arena0,X-1)]
+        self.try_fill_chunks();
+        if self.chunks.is_empty() && self.ever_returned {
+            return None;
+        }
+
         // slot_next_indices:[X,Y] chunks:[chunk(arena0,X-1),chunk(arena1,Y-1)]
+        self.ever_returned = true;
         Some(&self.chunks)
     }
 }
@@ -98,24 +106,19 @@ impl ChunkArena {
     pub fn from_slice<'a, const N: usize>(i: impl Iterator<Item = &'a [u8; N]> + 'a) -> Self {
         let mut me = Self::new(N);
         for chunk in i {
-            me.insert(chunk);
+            me.insert(chunk).expect("N constant, no?");
         }
         me
     }
     pub fn new(chunk_bytes: usize) -> Self {
         Self { data: Default::default(), chunk_bytes }
     }
-    pub fn contains(&self, chunk: &[u8]) -> Option<bool> {
-        if !self.check_chunk(chunk) {
-            return None;
-        } else {
-            Some(self.binary_search(chunk).1)
-        }
+    pub fn contains(&self, chunk: &[u8]) -> Result<bool, WrongSize> {
+        self.check_chunk(chunk)?;
+        Ok(self.binary_search(chunk).1)
     }
-    pub fn insert(&mut self, chunk: &[u8]) -> Option<(&[u8], bool)> {
-        if !self.check_chunk(chunk) {
-            return None;
-        }
+    pub fn insert(&mut self, chunk: &[u8]) -> Result<(&[u8], bool), WrongSize> {
+        self.check_chunk(chunk)?;
         let (index, had) = self.binary_search(chunk);
         if !had {
             // insert!
@@ -131,11 +134,15 @@ impl ChunkArena {
                 self.data.set_len(self.data.len() + self.chunk_bytes);
             }
         }
-        Some((self.get_index(index).unwrap(), had))
+        Ok((self.get_index(index).unwrap(), had))
     }
 
-    fn check_chunk(&self, chunk: &[u8]) -> bool {
-        chunk.len() <= self.chunk_bytes
+    fn check_chunk(&self, chunk: &[u8]) -> Result<(), WrongSize> {
+        if self.chunk_bytes != chunk.len() {
+            return Err(WrongSize { given: chunk.len(), expected: self.chunk_bytes });
+        } else {
+            Ok(())
+        }
     }
     fn len(&self) -> usize {
         self.data.len() / self.chunk_bytes

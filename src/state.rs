@@ -5,8 +5,13 @@ struct TypeId(u32);
 
 #[derive(Debug)]
 struct TypeDef {
-    label: &'static str,
+    name: &'static str,
     fields: Vec<TypeId>,
+}
+
+struct ConstTypeDef {
+    name: &'static str,
+    size: usize,
 }
 
 #[derive(Debug)]
@@ -75,21 +80,52 @@ struct State {
     type_info: TypeInfo,
 }
 struct PrintableStateInterpretation<'a>(&'a State);
+struct PrintableAtom<'a> {
+    state: &'a State,
+    tid: TypeId,
+    chunk: &'a [u8],
+}
 
 /////////////////
 impl TypeId {
-    const U8: Self = Self(0);
-    const U4: Self = Self(1);
-    const I4: Self = Self(2);
-    const fn const_size(self) -> Option<usize> {
+    const U08: Self = Self(0);
+    const U32: Self = Self(1);
+    const fn const_def(self) -> Option<ConstTypeDef> {
         Some(match self {
-            Self::U8 => 1,
-            Self::U4 | Self::I4 => 4,
+            Self::U08 => ConstTypeDef { size: 1, name: "u08" },
+            Self::U32 => ConstTypeDef { size: 5, name: "u32" },
             _ => return None,
         })
     }
 }
+impl ConstTypeDef {
+    fn size(self) -> usize {
+        self.size
+    }
+    fn name(self) -> &'static str {
+        self.name
+    }
+}
 impl TypeInfo {
+    fn lookup_type_size(&self, tid: TypeId) -> Result<usize, ()> {
+        tid.const_def()
+            .map(ConstTypeDef::size)
+            .or_else(|| self.type_size.get(&tid).copied())
+            .ok_or(())
+    }
+    fn lookup_type_fields(&self, tid: TypeId) -> Result<Option<&[TypeId]>, ()> {
+        if tid.const_def().is_some() {
+            Ok(None)
+        } else {
+            self.type_defs.get(&tid).map(|def| Some(def.fields.as_slice())).ok_or(())
+        }
+    }
+    fn lookup_type_name(&self, tid: TypeId) -> Result<&'static str, ()> {
+        tid.const_def()
+            .map(ConstTypeDef::name)
+            .or_else(|| self.type_defs.get(&tid).map(|def| def.name))
+            .ok_or(())
+    }
     fn new(type_defs: HashMap<TypeId, TypeDef>) -> Result<Self, ()> {
         let mut size_todo: HashSet<TypeId> = type_defs.keys().copied().collect();
         let mut type_size: HashMap<TypeId, usize> = Default::default();
@@ -99,12 +135,13 @@ impl TypeInfo {
 
         'arb: while let Some(mut tid) = size_todo.iter().copied().next() {
             'tid_compute: for _ in 0..MAX_DEPTH {
-                assert!(tid.const_size().is_none());
+                assert!(tid.const_def().is_none());
                 let def = type_defs.get(&tid).ok_or(())?;
                 let r: Result<usize, TypeId> = def.fields.iter().fold(Ok(0), |acc, field| {
                     Ok(acc?
                         + field
-                            .const_size()
+                            .const_def()
+                            .map(ConstTypeDef::size)
                             .or_else(|| type_size.get(field).copied())
                             .ok_or(*field)?)
                 });
@@ -219,42 +256,72 @@ impl State {
                 if self
                     .pos
                     .get(&state_rule.result_tid)
-                    .expect("unknown TID")
-                    .contains(&byte_buf)
-                    .expect("wrong len")
+                    .map(|arena| arena.contains(&byte_buf).expect("wrong len"))
+                    .unwrap_or(false)
                 {
                     println!("lol nevermind. already get this result");
                 } else {
                     println!("new result!");
-                    self.pos.get_mut(&state_rule.result_tid).unwrap().insert(&byte_buf).unwrap();
+                    self.pos
+                        .entry(state_rule.result_tid)
+                        .or_insert_with(|| {
+                            ChunkArena::new(
+                                self.type_info
+                                    .type_size
+                                    .get(&state_rule.result_tid)
+                                    .copied()
+                                    .expect("idk fam"),
+                            )
+                        })
+                        .insert(&byte_buf)
+                        .unwrap();
                     continue 'rules;
                 }
             }
         }
     }
 }
+impl std::fmt::Debug for PrintableAtom<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let maybe_fields =
+            self.state.type_info.lookup_type_fields(self.tid).expect("idk your fields");
+        if let Some(fields) = maybe_fields {
+            let name = self.state.type_info.lookup_type_name(self.tid).expect("idk this name");
+            let mut d = f.debug_tuple(name);
+            let d = &mut d;
+            let mut offset = 0;
+            for &field in fields {
+                let field_size =
+                    self.state.type_info.lookup_type_size(field).expect("idk this field size");
+                let offset2 = offset + field_size;
+                let field_chunk = &self.chunk[offset..offset2];
+                offset = offset2;
+                d.field(&PrintableAtom { state: self.state, tid: field, chunk: field_chunk });
+            }
+            d.finish()
+        } else {
+            self.chunk.fmt(f)
+        }
+    }
+}
 
 impl std::fmt::Debug for PrintableStateInterpretation<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let t = self
-            .0
-            .pos
-            .iter()
-            .flat_map(|(tid, arena)| arena.iter().map(move |chunk| ((tid, chunk), 'T')));
+        let t = self.0.pos.iter().flat_map(|(&tid, arena)| {
+            arena.iter().map(move |chunk| (PrintableAtom { state: &self.0, tid, chunk }, 'T'))
+        });
         if let Some(prev_pos) = self.0.prev_pos.as_ref() {
             let u = prev_pos.iter().flat_map(|(tid, arena)| {
                 arena
                     .iter()
                     .filter(|chunk| {
-                        let b: bool = self
-                            .0
+                        self.0
                             .pos
                             .get(tid)
-                            .map(|pos_arena| pos_arena.contains(chunk).expect("bad len"))
-                            .unwrap_or(false);
-                        b
+                            .map(|pos_arena| !pos_arena.contains(chunk).expect("bad len"))
+                            .unwrap_or(false)
                     })
-                    .map(move |chunk| ((tid, chunk), '?'))
+                    .map(move |chunk| (PrintableAtom { state: &self.0, tid: *tid, chunk }, '?'))
             });
             // let u = prev_pos.set_minus_iter(&self.0.pos).map(|atom| (atom, '?'));
             f.debug_map().entries(t.chain(u)).finish()
@@ -267,8 +334,8 @@ impl std::fmt::Debug for PrintableStateInterpretation<'_> {
 
 pub(crate) fn test() {
     let type_info = TypeInfo::new(hashmap! {
-        TypeId(5) => TypeDef { label: "person", fields: vec![TypeId::U8], },
-        TypeId(6) => TypeDef { label: "friend", fields: vec![TypeId(5), TypeId(5)], },
+        TypeId(5) => TypeDef { name: "person", fields: vec![TypeId::U08], },
+        TypeId(6) => TypeDef { name: "friend", fields: vec![TypeId(5), TypeId(5)], },
     })
     .expect("weh");
     println!("{:#?}", &type_info);
@@ -281,7 +348,7 @@ pub(crate) fn test() {
                 var_types: vec![],
                 frag_cmp_checks: vec![],
                 lit_checks: vec![],
-                result_tid: TypeId(5),
+                result_tid: TypeId(6),
                 result_frags: vec![
                     Frag { bytes_range: 0..1, source: FragSource::Const },
                     Frag { bytes_range: 0..1, source: FragSource::Const },
