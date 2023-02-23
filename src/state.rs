@@ -267,32 +267,43 @@ impl std::fmt::Debug for PrintableStateInterpretation<'_> {
 
 pub(crate) fn test() {
     let type_info = TypeInfo::new(hashmap! {
-        TypeId(5) => TypeDef { label: "person", fields: vec![TypeId::U8], }
+        TypeId(5) => TypeDef { label: "person", fields: vec![TypeId::U8], },
+        TypeId(6) => TypeDef { label: "friend", fields: vec![TypeId(5), TypeId(5)], },
     })
     .expect("weh");
     println!("{:#?}", &type_info);
-    return;
+    // return;
     let mut state = State {
         type_info,
         state_rules: vec![
+            // "42u8 is a person"
             StateRule {
-                var_types: vec![TypeId(0), TypeId(1)],
-                frag_cmp_checks: vec![
-                    FragCmpCheck {
-                        frag_a: Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
-                        frag_b: Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(1)) },
-                        cmp_kind: CmpKind::Leq,
-                    }, // whee
-                ],
+                var_types: vec![],
+                frag_cmp_checks: vec![],
                 lit_checks: vec![],
-                result_tid: TypeId(2),
+                result_tid: TypeId(5),
                 result_frags: vec![
-                    Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
-                    Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
-                    Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(1)) },
-                    Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(1)) },
+                    Frag { bytes_range: 0..1, source: FragSource::Const },
+                    Frag { bytes_range: 0..1, source: FragSource::Const },
                 ],
-            }, //whee
+            }, // StateRule {
+               //     var_types: vec![TypeId(0), TypeId(1)],
+               //     frag_cmp_checks: vec![
+               //         FragCmpCheck {
+               //             frag_a: Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
+               //             frag_b: Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(1)) },
+               //             cmp_kind: CmpKind::Leq,
+               //         }, // whee
+               //     ],
+               //     lit_checks: vec![],
+               //     result_tid: TypeId(2),
+               //     result_frags: vec![
+               //         Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
+               //         Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
+               //         Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(1)) },
+               //         Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(1)) },
+               //     ],
+               // }, //whee
         ],
         pos: hashmap! {
             TypeId(0) => ChunkArena::from_slice([[1], [2], [3]].iter()),
@@ -301,7 +312,7 @@ pub(crate) fn test() {
         },
         prev_pos: None,
         prev_prev_pos: None,
-        const_bytes: vec![],
+        const_bytes: vec![0u8],
     };
     let mut iterations = 0;
     loop {
