@@ -101,6 +101,8 @@ struct StateRule {
 struct State {
     state_rules: Vec<StateRule>,
     pos: HashMap<TypeId, ChunkArena>,
+    prev_pos: Option<HashMap<TypeId, ChunkArena>>,
+    prev_prev_pos: Option<HashMap<TypeId, ChunkArena>>,
     const_bytes: Vec<u8>,
 }
 
@@ -248,6 +250,8 @@ fn main() {
             TypeId(1) => ChunkArena::from_slice([[2], [3], [4]].iter()),
             TypeId(2) => ChunkArena::from_slice([[1,1,1,1]].iter()),
         },
+        prev_pos: None,
+        prev_prev_pos: None,
         const_bytes: vec![],
     };
     println!("{:#?}", &state.pos);
