@@ -6,6 +6,7 @@ use std::collections::HashMap;
 mod chunk_arena;
 mod debug;
 mod program;
+mod saturate;
 
 use chunk_arena::*;
 
@@ -65,28 +66,55 @@ struct VarFrag {
     var_idx: VarIdx,
     var_bytes: Range<u16>,
 }
-struct VarFragCmpCheck {
+#[derive(Debug, Clone)]
+enum FragSource {
+    Const,
+    Var(VarIdx),
+}
+#[derive(Debug, Clone)]
+struct Frag {
+    bytes_range: Range<u16>,
+    source: FragSource,
+}
+struct FragCmpCheck {
     // assumes ranges are in bounds AND same length
-    frag_a: VarFrag,
-    frag_b: VarFrag,
+    frag_a: Frag,
+    frag_b: Frag,
     cmp_kind: CmpKind,
 }
 struct ReturnInfo {
     built_range: Range<u16>,
     tid: TypeId,
 }
+struct LitCheck {
+    frags: Vec<Frag>,
+    tid: TypeId,
+    pos: bool,
+}
 struct StateRule {
     var_types: Vec<TypeId>, // will consider all quantifications
-    var_frag_cmp_checks: Vec<VarFragCmpCheck>,
+    frag_cmp_checks: Vec<FragCmpCheck>,
+    lit_checks: Vec<LitCheck>,
     result_tid: TypeId,
-    result_var_frags: Vec<VarFrag>,
+    result_frags: Vec<Frag>,
 }
 struct State {
     state_rules: Vec<StateRule>,
     pos: HashMap<TypeId, ChunkArena>,
+    const_bytes: Vec<u8>,
 }
 
+trait WordRange {
+    fn word_range(&self) -> Range<usize>;
+}
 ////////////////////////////
+
+impl WordRange for Range<u16> {
+    #[inline(always)]
+    fn word_range(&self) -> Range<usize> {
+        self.start as usize..self.end as usize
+    }
+}
 
 fn chunk_cmp(a: &[u8], b: &[u8]) -> Ordering {
     for (a, b) in a.iter().zip(b.iter()) {
@@ -96,52 +124,6 @@ fn chunk_cmp(a: &[u8], b: &[u8]) -> Ordering {
         }
     }
     Ordering::Equal
-}
-
-impl VarFrag {
-    fn get_slice<'a>(self, var_chunks: &'a [&'a [u8]]) -> &'a [u8] {
-        // assumes in bounds!
-        &var_chunks[self.var_idx.0 as usize]
-            [self.var_bytes.start as usize..self.var_bytes.end as usize]
-    }
-}
-impl State {
-    fn generate_all(&mut self) {
-        let mut result_buf: Vec<u8> = vec![];
-        let mut results: Vec<(TypeId, Range<usize>)> = vec![];
-        for state_rule in self.state_rules.iter() {
-            let mut var_arenas_combo =
-                ChunkCombo::new(state_rule.var_types.iter().map(|tid| self.pos.get(tid).unwrap()));
-            'combo: while let Some(var_chunks) = var_arenas_combo.next() {
-                for check in state_rule.var_frag_cmp_checks.iter() {
-                    let slice_a = check.frag_a.clone().get_slice(var_chunks);
-                    let slice_b = check.frag_b.clone().get_slice(var_chunks);
-                    let pass = match check.cmp_kind {
-                        CmpKind::Eq => slice_a == slice_b,
-                        CmpKind::Neq => slice_a != slice_b,
-                        CmpKind::Lt => chunk_cmp(slice_a, slice_b) == Ordering::Less,
-                        CmpKind::Leq => chunk_cmp(slice_a, slice_b) != Ordering::Greater,
-                    };
-                    if !pass {
-                        continue 'combo;
-                    }
-                }
-
-                let result_start = result_buf.len();
-                for frag in state_rule.result_var_frags.iter() {
-                    result_buf.extend(frag.clone().get_slice(var_chunks));
-                }
-                results.push((state_rule.result_tid, result_start..result_buf.len()));
-            }
-        }
-        println!(
-            "RES {:?}",
-            results
-                .iter()
-                .map(|(tid, range)| (tid, &result_buf[range.clone()]))
-                .collect::<Vec<_>>()
-        );
-    }
 }
 
 impl TypeInfo {
@@ -244,29 +226,35 @@ fn main() {
         state_rules: vec![
             StateRule {
                 var_types: vec![TypeId(0), TypeId(1)],
-                var_frag_cmp_checks: vec![
-                    VarFragCmpCheck {
-                        frag_a: VarFrag { var_idx: VarIdx(1), var_bytes: 0..1 },
-                        frag_b: VarFrag { var_idx: VarIdx(0), var_bytes: 0..1 },
+                frag_cmp_checks: vec![
+                    FragCmpCheck {
+                        frag_a: Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
+                        frag_b: Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(1)) },
                         cmp_kind: CmpKind::Leq,
                     }, // whee
                 ],
+                lit_checks: vec![],
                 result_tid: TypeId(2),
-                result_var_frags: vec![
-                    VarFrag { var_idx: VarIdx(0), var_bytes: 0..1 }, //whee
-                    VarFrag { var_idx: VarIdx(0), var_bytes: 0..1 }, //whee
-                    VarFrag { var_idx: VarIdx(1), var_bytes: 0..1 }, //whee
-                    VarFrag { var_idx: VarIdx(1), var_bytes: 0..1 }, //whee
+                result_frags: vec![
+                    Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
+                    Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
+                    Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(1)) },
+                    Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(1)) },
                 ],
             }, //whee
         ],
         pos: hashmap! {
             TypeId(0) => ChunkArena::from_slice([[1], [2], [3]].iter()),
             TypeId(1) => ChunkArena::from_slice([[2], [3], [4]].iter()),
+            TypeId(2) => ChunkArena::from_slice([[1,1,1,1]].iter()),
         },
+        const_bytes: vec![],
     };
     println!("{:#?}", &state.pos);
     state.generate_all();
+    println!("{:#?}", &state.pos);
+    state.generate_all();
+    println!("{:#?}", &state.pos);
 }
 
 fn main2() {

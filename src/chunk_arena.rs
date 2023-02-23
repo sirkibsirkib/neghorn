@@ -48,7 +48,7 @@ impl<'a> ChunkCombo<'a> {
             // BEFORE: slot_next_indices:[X,Y]   chunks:[chunk(arena0,X-1)]
             // AFTER : slot_next_indices:[X,Y+1] chunks:[chunk(arena0,X-1),chunk(arena1,Y)]
             for (i, slot) in self.slots[self.chunks.len()..].iter_mut().enumerate() {
-                if let Some(chunk) = slot.arena.get(slot.next_chunk_index) {
+                if let Some(chunk) = slot.arena.get_index(slot.next_chunk_index) {
                     self.chunks.push(chunk);
                     slot.next_chunk_index += 1;
                 } else {
@@ -87,6 +87,13 @@ impl ChunkArena {
     pub fn new(chunk_bytes: usize) -> Self {
         Self { data: Default::default(), chunk_bytes }
     }
+    pub fn contains(&self, chunk: &[u8]) -> Option<bool> {
+        if !self.check_chunk(chunk) {
+            return None;
+        } else {
+            Some(self.binary_search(chunk).1)
+        }
+    }
     pub fn insert(&mut self, chunk: &[u8]) -> Option<(&[u8], bool)> {
         if !self.check_chunk(chunk) {
             return None;
@@ -106,7 +113,7 @@ impl ChunkArena {
                 self.data.set_len(self.data.len() + self.chunk_bytes);
             }
         }
-        Some((self.get(index).unwrap(), had))
+        Some((self.get_index(index).unwrap(), had))
     }
 
     fn check_chunk(&self, chunk: &[u8]) -> bool {
@@ -115,7 +122,8 @@ impl ChunkArena {
     fn len(&self) -> usize {
         self.data.len() / self.chunk_bytes
     }
-    fn get(&self, index: usize) -> Option<&[u8]> {
+    // fn contains(&self, chunk)
+    fn get_index(&self, index: usize) -> Option<&[u8]> {
         let start = self.chunk_bytes * index;
         let range = start..(start + self.chunk_bytes);
         if self.data.len() < range.end {
@@ -132,7 +140,7 @@ impl ChunkArena {
         let mut r = self.len();
         while l < r {
             let m = (l + r) / 2;
-            match chunk_cmp(find, self.get(m).unwrap()) {
+            match chunk_cmp(find, self.get_index(m).unwrap()) {
                 Ordering::Equal => return (m, true),
                 Ordering::Less => r = m,
                 Ordering::Greater => l = m + 1,
