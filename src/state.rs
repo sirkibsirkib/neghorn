@@ -1,5 +1,96 @@
 use super::*;
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+struct TypeId(u32);
+struct TypeInfo {
+    type_fields: HashMap<TypeId, Vec<TypeId>>,
+    type_size: HashMap<TypeId, usize>, // sum of all
+}
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum TidSizeErr {
+    RecursiveDepthExceeded,
+    DependsOnSizeOfUnknown(TypeId),
+}
+
+enum CmpKind {
+    Leq,
+    Lt,
+    Eq,
+    Neq,
+}
+#[derive(Debug, Clone, Copy)]
+struct VarIdx(u8);
+
+#[derive(Debug, Clone)]
+struct VarFrag {
+    var_idx: VarIdx,
+    var_bytes: Range<u16>,
+}
+#[derive(Debug, Clone)]
+enum FragSource {
+    Const,
+    Var(VarIdx),
+}
+#[derive(Debug, Clone)]
+struct Frag {
+    bytes_range: Range<u16>,
+    source: FragSource,
+}
+struct FragCmpCheck {
+    // assumes ranges are in bounds AND same length
+    frag_a: Frag,
+    frag_b: Frag,
+    cmp_kind: CmpKind,
+}
+struct ReturnInfo {
+    built_range: Range<u16>,
+    tid: TypeId,
+}
+struct LitCheck {
+    frags: Vec<Frag>,
+    tid: TypeId,
+    pos: bool,
+}
+struct StateRule {
+    var_types: Vec<TypeId>, // will consider all quantifications
+    frag_cmp_checks: Vec<FragCmpCheck>,
+    lit_checks: Vec<LitCheck>,
+    result_tid: TypeId,
+    result_frags: Vec<Frag>,
+}
+struct State {
+    state_rules: Vec<StateRule>,
+    pos: HashMap<TypeId, ChunkArena>,
+    prev_pos: Option<HashMap<TypeId, ChunkArena>>,
+    prev_prev_pos: Option<HashMap<TypeId, ChunkArena>>,
+    const_bytes: Vec<u8>,
+}
+struct PrintableStateInterpretation<'a>(&'a State);
+
+/////////////////
+
+impl TypeInfo {
+    const INT_TID: TypeId = TypeId(0);
+    fn compute_size_of(&self, tid: TypeId, depth_to_go: u8) -> Result<usize, TidSizeErr> {
+        match tid {
+            Self::INT_TID => Ok(std::mem::size_of::<u32>()),
+            _ => {
+                if depth_to_go == 0 {
+                    Err(TidSizeErr::RecursiveDepthExceeded)
+                } else {
+                    let fields = self
+                        .type_fields
+                        .get(&tid)
+                        .ok_or(TidSizeErr::DependsOnSizeOfUnknown(tid))?;
+                    fields.iter().fold(Ok(0), |acc, &field| {
+                        Ok(acc? + self.compute_size_of(field, depth_to_go - 1)?)
+                    })
+                }
+            }
+        }
+    }
+}
+
 impl VarFrag {
     fn get_slice<'a>(self, var_chunks: &'a [&'a [u8]]) -> &'a [u8] {
         // assumes in bounds!

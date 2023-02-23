@@ -1,5 +1,64 @@
 use super::*;
 
+#[derive(Default, Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
+struct Atom(&'static str);
+
+#[derive(Default, Eq, PartialEq)]
+struct AtomSet {
+    sorted_vec: Vec<Atom>,
+}
+
+#[derive(Debug, Copy, Clone)]
+struct Literal {
+    atom: Atom,
+    pos: bool,
+}
+
+#[derive(Debug)]
+struct Rule {
+    head: Atom,
+    body: Vec<Literal>,
+}
+
+#[derive(Debug)]
+struct Kb {
+    pos: AtomSet,                   // inverse is interpretation #N
+    prev_pos: Option<AtomSet>,      // inverse is interpretation #N-1
+    prev_prev_pos: Option<AtomSet>, // // inverse is interpretation #N-2
+}
+
+struct Valuation<'a>(&'a Kb);
+
+impl Literal {
+    fn pos(atom: Atom) -> Self {
+        Self { pos: true, atom }
+    }
+    fn neg(atom: Atom) -> Self {
+        Self { pos: false, atom }
+    }
+}
+
+impl AtomSet {
+    fn iter(&self) -> impl Iterator<Item = Atom> + '_ {
+        self.sorted_vec.iter().copied()
+    }
+    fn insert(&mut self, atom: Atom) -> bool {
+        match self.sorted_vec.binary_search(&atom) {
+            Ok(_) => false,
+            Err(i) => {
+                self.sorted_vec.insert(i, atom);
+                true
+            }
+        }
+    }
+    fn contains(&self, atom: Atom) -> bool {
+        self.sorted_vec.binary_search(&atom).is_ok()
+    }
+    fn set_minus_iter<'a, 'b: 'a>(&'a self, other: &'b Self) -> impl Iterator<Item = Atom> + 'a {
+        self.sorted_vec.iter().copied().filter(|&atom| !other.contains(atom))
+    }
+}
+
 impl std::fmt::Debug for Valuation<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let t = self.0.pos.iter().map(|x| (x, 'T'));
