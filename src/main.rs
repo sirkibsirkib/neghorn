@@ -4,11 +4,11 @@ use maplit::hashmap;
 use std::collections::HashMap;
 
 mod chunk_arena;
-mod debug;
+mod old_kb;
 mod program;
-mod saturate;
+mod state;
 
-use chunk_arena::*;
+use chunk_arena::{ChunkArena, ChunkCombo};
 
 #[derive(Default, Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
 struct Atom(&'static str);
@@ -105,6 +105,7 @@ struct State {
     prev_prev_pos: Option<HashMap<TypeId, ChunkArena>>,
     const_bytes: Vec<u8>,
 }
+struct PrintableStateInterpretation<'a>(&'a State);
 
 trait WordRange {
     fn word_range(&self) -> Range<usize>;
@@ -180,139 +181,6 @@ impl AtomSet {
     }
 }
 
-impl Default for Kb {
-    fn default() -> Self {
-        Self { pos: Default::default(), prev_pos: None, prev_prev_pos: None }
-    }
-}
-impl Kb {
-    fn contains(&self, lit: Literal) -> bool {
-        if lit.pos {
-            self.pos.contains(lit.atom)
-        } else {
-            if let Some(prev_pos) = &self.prev_pos {
-                !prev_pos.contains(lit.atom)
-            } else {
-                false
-            }
-        }
-    }
-}
-impl Rule {
-    fn body_sat(&self, kb: &Kb) -> bool {
-        self.body.iter().all(|&subgoal| kb.contains(subgoal))
-    }
-}
-
-impl Kb {
-    fn advance(&mut self) {
-        self.prev_prev_pos = self.prev_pos.replace(std::mem::take(&mut self.pos));
-    }
-    fn saturate(&mut self, rules: &[Rule]) {
-        'c: loop {
-            // println!("pos:{:?}", &self.pos);
-            for rule in rules {
-                if !self.contains(Literal::pos(rule.head)) && rule.body_sat(self) {
-                    // println!("applicable {:?}", rule);
-                    self.pos.insert(rule.head);
-                    continue 'c;
-                }
-            }
-            break 'c;
-        }
-    }
-}
-
 fn main() {
-    let mut state = State {
-        state_rules: vec![
-            StateRule {
-                var_types: vec![TypeId(0), TypeId(1)],
-                frag_cmp_checks: vec![
-                    FragCmpCheck {
-                        frag_a: Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
-                        frag_b: Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(1)) },
-                        cmp_kind: CmpKind::Leq,
-                    }, // whee
-                ],
-                lit_checks: vec![],
-                result_tid: TypeId(2),
-                result_frags: vec![
-                    Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
-                    Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
-                    Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(1)) },
-                    Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(1)) },
-                ],
-            }, //whee
-        ],
-        pos: hashmap! {
-            TypeId(0) => ChunkArena::from_slice([[1], [2], [3]].iter()),
-            TypeId(1) => ChunkArena::from_slice([[2], [3], [4]].iter()),
-            TypeId(2) => ChunkArena::from_slice([[1,1,1,1]].iter()),
-        },
-        prev_pos: None,
-        prev_prev_pos: None,
-        const_bytes: vec![],
-    };
-    println!("{:#?}", &state.pos);
-    state.generate_all();
-    println!("{:#?}", &state.pos);
-    state.generate_all();
-    println!("{:#?}", &state.pos);
-}
-
-fn main2() {
-    let mut ca = chunk_arena::ChunkArena::new(3);
-    println!("{:?}", &ca);
-    println!("{:?}", ca.insert(&[0, 1, 2]));
-    println!("{:?}", &ca.data);
-    println!("{:?}", ca.insert(&[0, 1, 1]));
-    println!("{:?}", &ca.data);
-    println!("{:?}", ca.insert(&[7, 1, 1]));
-    println!("{:?}", &ca.data);
-    println!("{:?}", ca.insert(&[3, 1, 1]));
-    println!("{:?}", &ca.data);
-}
-
-fn main1() {
-    let rules = vec![
-        Rule {
-            head: Atom("other_role_in(amy,r1,a)"),
-            body: vec![Literal::pos(Atom("role_in(bob,r1,a)"))],
-        }, //whee
-        Rule {
-            head: Atom("role_in(amy,r1,a)"),
-            body: vec![
-                Literal::pos(Atom("role_in(amy,r2,a)")),
-                Literal::neg(Atom("other_role_in(amy,r1,a)")),
-            ],
-        }, //whee
-        Rule { head: Atom("role_in(amy,r2,a)"), body: vec![] }, //whee
-        Rule { head: Atom("role_in(bob,r1,a)"), body: vec![] }, //whee
-    ];
-
-    // //
-    // let rules = vec![
-    //     Rule { head: Atom('T'), body: vec![Literal::pos(Atom('t'))] }, //whee
-    //     Rule { head: Atom('V'), body: vec![Literal::pos(Atom('h')), Literal::neg(Atom('T'))] },
-    //     Rule { head: Atom('h'), body: vec![] },
-    //     // Rule { head: Atom('t'), body: vec![] },
-    // ];
-
-    let mut kb = Kb { pos: Default::default(), prev_pos: None, prev_prev_pos: None };
-    let start = std::time::Instant::now();
-    let mut iterations_taken = 0;
-    for i in 0.. {
-        // println!("ADVANCED {:#?}", &kb);
-        kb.saturate(&rules);
-        // println!("SATURATED {:#?}", &kb);
-        if i % 2 == 0 && Some(&kb.pos) == kb.prev_prev_pos.as_ref() {
-            iterations_taken = i;
-            break;
-        }
-        kb.advance();
-    }
-    println!("Time taken, start to finish: {:?}", start.elapsed());
-    println!("iterations_taken: {:?}", iterations_taken);
-    println!("{:#?}", Valuation(&kb));
+    state::test();
 }

@@ -1,27 +1,36 @@
 use crate::chunk_cmp;
 use core::cmp::Ordering;
 
-#[derive(Debug)]
+#[derive(Debug, Eq)]
 pub(crate) struct ChunkArena {
-    pub(crate) data: Vec<u8>,
+    data: Vec<u8>,
     chunk_bytes: usize,
 }
-// pub(crate) struct ChunkIter<'a> {
-//     ca: &'a ChunkArena,
-//     next_index: usize,
-// }
 
-////////////
-#[derive(Debug)]
-struct ChunkSlot<'a> {
-    next_chunk_index: usize, // next chunk to read to fill ChunkCombo::chunks
+pub(crate) struct ChunkIter<'a> {
     arena: &'a ChunkArena,
+    next_chunk_index: usize,
 }
+
 #[derive(Debug)]
 pub(crate) struct ChunkCombo<'a> {
     // invariant: indices in range
     slots: Vec<ChunkSlot<'a>>,
     chunks: Vec<&'a [u8]>,
+}
+#[derive(Debug)]
+struct ChunkSlot<'a> {
+    next_chunk_index: usize, // next chunk to read to fill ChunkCombo::chunks
+    arena: &'a ChunkArena,
+}
+////////////
+impl<'a> Iterator for ChunkIter<'a> {
+    type Item = &'a [u8];
+    fn next(&mut self) -> Option<Self::Item> {
+        let res = self.arena.get_index(self.next_chunk_index)?;
+        self.next_chunk_index += 1;
+        Some(res)
+    }
 }
 impl<'a> ChunkCombo<'a> {
     pub(crate) fn new(arenas: impl Iterator<Item = &'a ChunkArena>) -> Self {
@@ -76,7 +85,16 @@ impl<'a> ChunkCombo<'a> {
     }
 }
 
+impl PartialEq for ChunkArena {
+    fn eq(&self, other: &Self) -> bool {
+        self.chunk_bytes == other.chunk_bytes // assumed true for all my cases
+        && self.data == other.data
+    }
+}
 impl ChunkArena {
+    pub fn iter(&self) -> ChunkIter {
+        ChunkIter { arena: self, next_chunk_index: 0 }
+    }
     pub fn from_slice<'a, const N: usize>(i: impl Iterator<Item = &'a [u8; N]> + 'a) -> Self {
         let mut me = Self::new(N);
         for chunk in i {
@@ -151,4 +169,17 @@ impl ChunkArena {
     // pub fn iter(&self) -> ChunkIter {
     //     ChunkIter { ca: self, next_index: 0 }
     // }
+}
+
+pub(crate) fn test() {
+    let mut ca = ChunkArena::new(3);
+    println!("{:?}", &ca);
+    println!("{:?}", ca.insert(&[0, 1, 2]));
+    println!("{:?}", &ca.data);
+    println!("{:?}", ca.insert(&[0, 1, 1]));
+    println!("{:?}", &ca.data);
+    println!("{:?}", ca.insert(&[7, 1, 1]));
+    println!("{:?}", &ca.data);
+    println!("{:?}", ca.insert(&[3, 1, 1]));
+    println!("{:?}", &ca.data);
 }
