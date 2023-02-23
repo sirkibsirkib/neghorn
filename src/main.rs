@@ -8,7 +8,7 @@ mod chunk_arena;
 // mod program;
 mod state;
 
-use chunk_arena::{ChunkArena, ChunkCombo};
+use chunk_arena::{ChunkArena, ChunkCombo, WrongSize};
 
 trait WordRange {
     fn word_range(&self) -> Range<usize>;

@@ -62,7 +62,7 @@ struct ReturnInfo {
 struct LitCheck {
     frags: Vec<Frag>,
     tid: TypeId,
-    pos: bool,
+    sign: Sign,
 }
 struct StateRule {
     var_types: Vec<TypeId>, // will consider all quantifications
@@ -84,6 +84,12 @@ struct PrintableAtom<'a> {
     state: &'a State,
     tid: TypeId,
     chunk: &'a [u8],
+}
+
+#[derive(Copy, Clone, Debug)]
+enum Sign {
+    Pos,
+    Neg,
 }
 
 /////////////////
@@ -171,6 +177,25 @@ impl VarFrag {
     }
 }
 impl State {
+    fn known(&self, sign: Sign, tid: TypeId, chunk: &[u8]) -> Result<bool, WrongSize> {
+        let f = |arenas: &HashMap<TypeId, ChunkArena>| {
+            if let Some(arena) = arenas.get(&tid) {
+                arena.contains(chunk)
+            } else {
+                Ok(false)
+            }
+        };
+        match sign {
+            Sign::Pos => f(&self.pos),
+            Sign::Neg => {
+                if let Some(arenas) = self.prev_pos.as_ref() {
+                    f(arenas).map(core::ops::Not::not)
+                } else {
+                    Ok(false)
+                }
+            }
+        }
+    }
     pub(crate) fn advance(&mut self) {
         self.prev_prev_pos = self.prev_pos.replace(std::mem::take(&mut self.pos));
     }
@@ -189,102 +214,88 @@ impl State {
     }
     pub(crate) fn saturate(&mut self) {
         let mut byte_buf: Vec<u8> = vec![];
-        'rules: for state_rule in self.state_rules.iter() {
-            let maybe_var_arenas = state_rule.var_types.iter().map(|tid| self.pos.get(tid));
-            if maybe_var_arenas.clone().any(|maybe_arena| maybe_arena.is_none()) {
-                continue 'rules;
-            }
-            let mut var_arenas_combo = ChunkCombo::new(maybe_var_arenas.map(Option::unwrap));
-            'combo: while let Some(var_chunks) = var_arenas_combo.next() {
-                // cmp checks
-                for cmp_check in state_rule.frag_cmp_checks.iter() {
-                    let slice_a = self.frag_slice(&cmp_check.frag_a, var_chunks);
-                    let slice_b = self.frag_slice(&cmp_check.frag_b, var_chunks);
-                    let pass = match cmp_check.cmp_kind {
-                        CmpKind::Eq => slice_a == slice_b,
-                        CmpKind::Neq => slice_a != slice_b,
-                        CmpKind::Lt => chunk_cmp(slice_a, slice_b) == Ordering::Less,
-                        CmpKind::Leq => chunk_cmp(slice_a, slice_b) != Ordering::Greater,
-                    };
-                    if !pass {
-                        continue 'combo;
-                    }
-                }
-                // lit checks
-                for lit_check in state_rule.lit_checks.iter() {
-                    byte_buf.clear();
-
-                    for frag in lit_check.frags.iter() {
-                        byte_buf.extend(self.frag_slice(frag, var_chunks));
-                        if lit_check.pos {
-                            // checking known truth of this atom
-                            let contained = self
-                                .pos
-                                .get(&lit_check.tid)
-                                .expect("unknown TID")
-                                .contains(&byte_buf)
-                                .expect("wrong len");
-                            if !contained {
-                                println!("lol nevermind. literal should be positive, but it isn't");
-                                continue 'combo;
-                            }
-                        } else {
-                            // checking known falsity of this atom
-                            if let Some(prev_pos) = self.prev_pos.as_ref() {
-                                let contained = prev_pos
-                                    .get(&lit_check.tid)
-                                    .expect("unknown TID")
-                                    .contains(&byte_buf)
-                                    .expect("wrong len");
-                                if contained {
-                                    // this particlar atom is NOT known to be false
-                                    continue 'combo;
-                                }
-                            } else {
-                                // NO known false atoms
-                                continue 'combo;
-                            }
-                        }
-                    }
-                    // whee
-                }
-                // results
-                byte_buf.clear();
-                for frag in state_rule.result_frags.iter() {
-                    byte_buf.extend(self.frag_slice(frag, var_chunks));
-                }
-                if self
-                    .pos
-                    .get(&state_rule.result_tid)
-                    .map(|arena| arena.contains(&byte_buf).expect("wrong len"))
-                    .unwrap_or(false)
-                {
-                    println!("lol nevermind. already get this result");
-                } else {
-                    println!("new result!");
-                    self.pos
-                        .entry(state_rule.result_tid)
-                        .or_insert_with(|| {
-                            ChunkArena::new(
-                                self.type_info
-                                    .type_size
-                                    .get(&state_rule.result_tid)
-                                    .copied()
-                                    .expect("idk fam"),
-                            )
-                        })
-                        .insert(&byte_buf)
-                        .unwrap();
+        'all_rules: loop {
+            'rules: for state_rule in self.state_rules.iter() {
+                let maybe_var_arenas = state_rule.var_types.iter().map(|tid| self.pos.get(tid));
+                if maybe_var_arenas.clone().any(|maybe_arena| maybe_arena.is_none()) {
                     continue 'rules;
                 }
+                let mut var_arenas_combo = ChunkCombo::new(maybe_var_arenas.map(Option::unwrap));
+                'combo: while let Some(var_chunks) = var_arenas_combo.next() {
+                    // cmp checks
+                    for cmp_check in state_rule.frag_cmp_checks.iter() {
+                        let slice_a = self.frag_slice(&cmp_check.frag_a, var_chunks);
+                        let slice_b = self.frag_slice(&cmp_check.frag_b, var_chunks);
+                        let pass = match cmp_check.cmp_kind {
+                            CmpKind::Eq => slice_a == slice_b,
+                            CmpKind::Neq => slice_a != slice_b,
+                            CmpKind::Lt => chunk_cmp(slice_a, slice_b) == Ordering::Less,
+                            CmpKind::Leq => chunk_cmp(slice_a, slice_b) != Ordering::Greater,
+                        };
+                        if !pass {
+                            continue 'combo;
+                        }
+                    }
+                    // lit checks
+                    for lit_check in state_rule.lit_checks.iter() {
+                        byte_buf.clear();
+                        for frag in lit_check.frags.iter() {
+                            byte_buf.extend(self.frag_slice(frag, var_chunks));
+                        }
+                        let known = self
+                            .known(lit_check.sign, lit_check.tid, &byte_buf)
+                            .expect("wrong size??");
+                        println!(
+                            "{:?} {:?} {:?} {:?}",
+                            lit_check.sign, lit_check.tid, &byte_buf, known
+                        );
+                        if !known {
+                            continue 'combo;
+                        }
+                        // whee
+                    }
+                    // results
+                    byte_buf.clear();
+                    for frag in state_rule.result_frags.iter() {
+                        byte_buf.extend(self.frag_slice(frag, var_chunks));
+                    }
+                    if self
+                        .pos
+                        .get(&state_rule.result_tid)
+                        .map(|arena| arena.contains(&byte_buf).expect("wrong len"))
+                        .unwrap_or(false)
+                    {
+                        println!("lol nevermind. already get this result");
+                    } else {
+                        println!("new result! {:?} {:?}", state_rule.result_tid, &byte_buf);
+                        self.pos
+                            .entry(state_rule.result_tid)
+                            .or_insert_with(|| {
+                                ChunkArena::new(
+                                    self.type_info
+                                        .type_size
+                                        .get(&state_rule.result_tid)
+                                        .copied()
+                                        .expect("idk fam"),
+                                )
+                            })
+                            .insert(&byte_buf)
+                            .unwrap();
+                        continue 'all_rules;
+                    }
+                }
             }
+            break 'all_rules;
         }
     }
 }
 impl std::fmt::Debug for PrintableAtom<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let maybe_fields =
-            self.state.type_info.lookup_type_fields(self.tid).expect("idk your fields");
+        let maybe_fields = self
+            .state
+            .type_info
+            .lookup_type_fields(self.tid)
+            .expect(&format!("idk your fields {:?}", self.tid));
         if let Some(fields) = maybe_fields {
             let name = self.state.type_info.lookup_type_name(self.tid).expect("idk this name");
             let mut d = f.debug_tuple(name);
@@ -344,47 +355,98 @@ pub(crate) fn test() {
         type_info,
         state_rules: vec![
             // "42u8 is a person"
+            // StateRule {
+            //     var_types: vec![],
+            //     frag_cmp_checks: vec![],
+            //     lit_checks: vec![],
+            //     result_tid: TypeId(5),
+            //     result_frags: vec![Frag { bytes_range: 0..1, source: FragSource::Const }],
+            // },
+            // "c <="
             StateRule {
                 var_types: vec![],
                 frag_cmp_checks: vec![],
                 lit_checks: vec![],
-                result_tid: TypeId(6),
-                result_frags: vec![
-                    Frag { bytes_range: 0..1, source: FragSource::Const },
-                    Frag { bytes_range: 0..1, source: FragSource::Const },
+                result_tid: TypeId(5),
+                result_frags: vec![Frag { bytes_range: 2..3, source: FragSource::Const }],
+            },
+            // "b <= !a"
+            StateRule {
+                var_types: vec![],
+                frag_cmp_checks: vec![],
+                lit_checks: vec![LitCheck {
+                    frags: vec![Frag { bytes_range: 0..1, source: FragSource::Const }],
+                    tid: TypeId(5),
+                    sign: Sign::Neg,
+                }],
+                result_tid: TypeId(5),
+                result_frags: vec![Frag { bytes_range: 1..2, source: FragSource::Const }],
+            },
+            // "a <= c, !b"
+            StateRule {
+                var_types: vec![],
+                frag_cmp_checks: vec![],
+                lit_checks: vec![
+                    LitCheck {
+                        frags: vec![Frag { bytes_range: 2..3, source: FragSource::Const }],
+                        tid: TypeId(5),
+                        sign: Sign::Pos,
+                    },
+                    LitCheck {
+                        frags: vec![Frag { bytes_range: 1..2, source: FragSource::Const }],
+                        tid: TypeId(5),
+                        sign: Sign::Neg,
+                    },
                 ],
-            }, // StateRule {
-               //     var_types: vec![TypeId(0), TypeId(1)],
-               //     frag_cmp_checks: vec![
-               //         FragCmpCheck {
-               //             frag_a: Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
-               //             frag_b: Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(1)) },
-               //             cmp_kind: CmpKind::Leq,
-               //         }, // whee
-               //     ],
-               //     lit_checks: vec![],
-               //     result_tid: TypeId(2),
-               //     result_frags: vec![
-               //         Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
-               //         Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
-               //         Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(1)) },
-               //         Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(1)) },
-               //     ],
-               // }, //whee
+                result_tid: TypeId(5),
+                result_frags: vec![Frag { bytes_range: 0..1, source: FragSource::Const }],
+            },
+            // every person is their own friend
+            // StateRule {
+            //     var_types: vec![TypeId(5)],
+            //     frag_cmp_checks: vec![],
+            //     lit_checks: vec![],
+            //     result_tid: TypeId(6),
+            //     result_frags: vec![
+            //         Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
+            //         Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
+            //     ],
+            // },
+            // StateRule {
+            //     var_types: vec![TypeId(0), TypeId(1)],
+            //     frag_cmp_checks: vec![
+            //         FragCmpCheck {
+            //             frag_a: Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
+            //             frag_b: Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(1)) },
+            //             cmp_kind: CmpKind::Leq,
+            //         }, // whee
+            //     ],
+            //     lit_checks: vec![],
+            //     result_tid: TypeId(2),
+            //     result_frags: vec![
+            //         Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
+            //         Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
+            //         Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(1)) },
+            //         Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(1)) },
+            //     ],
+            // }, //whee
         ],
-        pos: hashmap! {
-            TypeId(0) => ChunkArena::from_slice([[1], [2], [3]].iter()),
-            TypeId(1) => ChunkArena::from_slice([[2], [3], [4]].iter()),
-            TypeId(2) => ChunkArena::from_slice([[1,1,1,1]].iter()),
-        },
+        pos: Default::default(),
         prev_pos: None,
         prev_prev_pos: None,
-        const_bytes: vec![0u8],
+        const_bytes: vec![11u8, 22u8, 33u8],
     };
     let mut iterations = 0;
     loop {
         // println!("ADVANCED {:#?}", &kb);
         state.saturate();
+        println!(
+            "{} POS {:?}\nNEG {:?}\n$$$ {:?}\n",
+            iterations,
+            &state.pos,
+            &state.prev_pos,
+            PrintableStateInterpretation(&state),
+        );
         // println!("SATURATED {:#?}", &kb);
         if iterations % 2 == 0 && state.pos_and_prev_prev_eq() {
             break;
@@ -393,9 +455,9 @@ pub(crate) fn test() {
         iterations += 1;
     }
     println!("iterations {:?}", iterations);
-    println!("{:#?}", PrintableStateInterpretation(&state));
+    println!("SOLUTION {:?}", PrintableStateInterpretation(&state));
     // state.saturate();
-    // println!("{:#?}", &state.pos);
+    println!("POS {:#?}\nPREV_POS {:?}", &state.pos, &state.prev_pos);
     // state.saturate();
     // println!("{:#?}", &state.pos);
 }
