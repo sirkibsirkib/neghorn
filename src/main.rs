@@ -78,8 +78,8 @@ struct ReturnInfo {
 struct StateRule {
     var_types: Vec<TypeId>, // will consider all quantifications
     var_frag_cmp_checks: Vec<VarFragCmpCheck>,
-    return_tid: TypeId,
-    return_var_frags: Vec<VarFrag>,
+    result_tid: TypeId,
+    result_var_frags: Vec<VarFrag>,
 }
 struct State {
     state_rules: Vec<StateRule>,
@@ -108,6 +108,7 @@ impl VarFrag {
 impl State {
     fn generate_all(&mut self) {
         let mut result_buf: Vec<u8> = vec![];
+        let mut results: Vec<(TypeId, Range<usize>)> = vec![];
         for state_rule in self.state_rules.iter() {
             let mut var_arenas_combo =
                 ChunkCombo::new(state_rule.var_types.iter().map(|tid| self.pos.get(tid).unwrap()));
@@ -126,13 +127,20 @@ impl State {
                     }
                 }
 
-                for frag in state_rule.return_var_frags.iter() {
+                let result_start = result_buf.len();
+                for frag in state_rule.result_var_frags.iter() {
                     result_buf.extend(frag.clone().get_slice(var_chunks));
                 }
-                println!("RES {:?}", result_buf);
-                result_buf.clear();
+                results.push((state_rule.result_tid, result_start..result_buf.len()));
             }
         }
+        println!(
+            "RES {:?}",
+            results
+                .iter()
+                .map(|(tid, range)| (tid, &result_buf[range.clone()]))
+                .collect::<Vec<_>>()
+        );
     }
 }
 
@@ -243,8 +251,8 @@ fn main() {
                         cmp_kind: CmpKind::Leq,
                     }, // whee
                 ],
-                return_tid: TypeId(2),
-                return_var_frags: vec![
+                result_tid: TypeId(2),
+                result_var_frags: vec![
                     VarFrag { var_idx: VarIdx(0), var_bytes: 0..1 }, //whee
                     VarFrag { var_idx: VarIdx(0), var_bytes: 0..1 }, //whee
                     VarFrag { var_idx: VarIdx(1), var_bytes: 0..1 }, //whee
