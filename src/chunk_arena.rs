@@ -11,10 +11,12 @@ pub(crate) struct ChunkArena {
 // }
 
 ////////////
+#[derive(Debug)]
 struct ChunkSlot<'a> {
-    next_chunk_index: usize,
+    next_chunk_index: usize, // next chunk to read to fill ChunkCombo::chunks
     arena: &'a ChunkArena,
 }
+#[derive(Debug)]
 pub(crate) struct ChunkCombo<'a> {
     // invariant: indices in range
     slots: Vec<ChunkSlot<'a>>,
@@ -30,53 +32,61 @@ impl<'a> ChunkCombo<'a> {
 }
 impl<'a> ChunkCombo<'a> {
     pub(crate) fn next(&mut self) -> Option<&[&[u8]]> {
-        assert!(!self.slots.is_empty());
-        assert!(self.chunks.is_empty());
+        // chunks are either EMPTY (first iteration) or FULL (otherwise)
 
+        // advance to the next combination by incrmenting last slot by 1.
+        // BEFORE: slot_next_indices:[X,Y] chunks:[chunk(arena0,X-1),chunk(arena1,Y-1)]
+        // AFTER : slot_next_indices:[X,Y] chunks:[chunk(arena0,X-1)]
+        self.chunks.pop(); // no effect if EMPTY already :) perfect.
         'outer: loop {
-            let slot0 = &self.slots[0];
-            if slot0.arena.len() <= slot0.next_chunk_index {
+            if self.slots.is_empty() {
+                // that's the signal for being done!
                 return None;
             }
 
-            // add remaining chunks
+            // BEFORE: slot_next_indices:[X,Y]   chunks:[chunk(arena0,X-1)]
+            // AFTER : slot_next_indices:[X,Y+1] chunks:[chunk(arena0,X-1),chunk(arena1,Y)]
             for (i, slot) in self.slots[self.chunks.len()..].iter_mut().enumerate() {
                 if let Some(chunk) = slot.arena.get(slot.next_chunk_index) {
                     self.chunks.push(chunk);
                     slot.next_chunk_index += 1;
                 } else {
                     // back up!
+                    // BEFORE: slot_next_indices:[X,Y] chunks:[chunk(arena0,X-1)]
+                    // AFTER : slot_next_indices:[X,0] chunks:[chunk(arena0,X-1)]
                     for slot in self.slots[(self.chunks.len() + i)..].iter_mut() {
                         slot.next_chunk_index = 0;
                     }
-                    self.chunks.pop().expect("previous IF catches this");
+                    // BEFORE: slot_next_indices:[X,0] chunks:[chunk(arena0,X-1)]
+                    // AFTER : slot_next_indices:[X,0] chunks:[]
+                    if self.chunks.pop().is_none() {
+                        // case of chunks==[] before! (trying to set chunk len to -1).
+                        // instead, mark STOP condition: slots := chunks := [].
+                        self.slots.clear();
+                        self.chunks.clear();
+                    }
                     continue 'outer;
                 }
             }
             break 'outer; // ok!
         }
+        // slot_next_indices:[X,Y] chunks:[chunk(arena0,X-1),chunk(arena1,Y-1)]
         Some(&self.chunks)
     }
 }
-// impl ChunkIter<'_> {
-//     pub(crate) fn has_next(&self) -> bool {
-//         self.ca.get(self.next_index).is_some()
-//     }
-// }
-// impl<'a> Iterator for ChunkIter<'a> {
-//     type Item = &'a [u8];
-//     fn next(&mut self) -> Option<Self::Item> {
-//         let res = self.ca.get(self.next_index)?;
-//         self.next_index += 1;
-//         Some(res)
-//     }
-// }
 
 impl ChunkArena {
+    pub fn from_slice<'a, const N: usize>(i: impl Iterator<Item = &'a [u8; N]> + 'a) -> Self {
+        let mut me = Self::new(N);
+        for chunk in i {
+            me.insert(chunk);
+        }
+        me
+    }
     pub fn new(chunk_bytes: usize) -> Self {
         Self { data: Default::default(), chunk_bytes }
     }
-    pub fn add(&mut self, chunk: &[u8]) -> Option<(&[u8], bool)> {
+    pub fn insert(&mut self, chunk: &[u8]) -> Option<(&[u8], bool)> {
         if !self.check_chunk(chunk) {
             return None;
         }
@@ -121,13 +131,11 @@ impl ChunkArena {
         let mut r = self.len();
         while l < r {
             let m = (l + r) / 2;
-            println!("lmr {:?}", [l, m, r]);
             match chunk_cmp(find, self.get(m).unwrap()) {
                 Ordering::Equal => return (m, true),
                 Ordering::Less => r = m,
                 Ordering::Greater => l = m + 1,
             }
-            println!("lmr' {:?}", [l, m, r]);
         }
         return (l, false);
     }

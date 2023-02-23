@@ -55,6 +55,10 @@ enum EqCheckKind {
     Neq,
 }
 struct VarIdx(u8);
+struct VarFrag {
+    var_idx: VarIdx,
+    bytes: Range<u16>,
+}
 struct EqCheck {
     kind: EqCheckKind,
     a: VarIdx,
@@ -71,7 +75,7 @@ struct StateRule {
     var_types: Vec<TypeId>, // will consider all quantifications
     eq_checks: Vec<EqCheck>,
     return_tid: TypeId,
-    return_fields: VarIdx,
+    return_frags: Vec<VarFrag>,
 }
 struct State {
     state_rules: Vec<StateRule>,
@@ -86,7 +90,7 @@ impl State {
             let mut chunk_combo =
                 ChunkCombo::new(state_rule.var_types.iter().map(|tid| self.pos.get(tid).unwrap()));
             while let Some(chunk_slice) = chunk_combo.next() {
-                println!("{:?}", chunk_slice);
+                println!("$  {:?}\n", chunk_slice);
             }
         }
     }
@@ -189,24 +193,33 @@ impl Kb {
 
 fn main() {
     let mut state = State {
-        state_rules: vec![],
+        state_rules: vec![
+            StateRule {
+                var_types: vec![TypeId(0), TypeId(1)],
+                eq_checks: vec![],
+                return_tid: TypeId(2),
+                return_frags: vec![],
+            }, //whee
+        ],
         pos: hashmap! {
-            // TypeId(0) =>
+            TypeId(0) => ChunkArena::from_slice([[10], [11], [12]].iter()),
+            TypeId(1) => ChunkArena::from_slice([[20], [21], [22]].iter()),
         },
     };
+    println!("{:#?}", &state.pos);
     state.generate_all();
 }
 
 fn main2() {
     let mut ca = chunk_arena::ChunkArena::new(3);
     println!("{:?}", &ca);
-    println!("{:?}", ca.add(&[0, 1, 2]));
+    println!("{:?}", ca.insert(&[0, 1, 2]));
     println!("{:?}", &ca.data);
-    println!("{:?}", ca.add(&[0, 1, 1]));
+    println!("{:?}", ca.insert(&[0, 1, 1]));
     println!("{:?}", &ca.data);
-    println!("{:?}", ca.add(&[7, 1, 1]));
+    println!("{:?}", ca.insert(&[7, 1, 1]));
     println!("{:?}", &ca.data);
-    println!("{:?}", ca.add(&[3, 1, 1]));
+    println!("{:?}", ca.insert(&[3, 1, 1]));
     println!("{:?}", &ca.data);
 }
 
