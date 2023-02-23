@@ -5,25 +5,72 @@ pub(crate) struct ChunkArena {
     pub(crate) data: Vec<u8>,
     chunk_bytes: usize,
 }
-pub(crate) struct ChunkIter<'a> {
-    ca: &'a ChunkArena,
-    next_index: usize,
-}
+// pub(crate) struct ChunkIter<'a> {
+//     ca: &'a ChunkArena,
+//     next_index: usize,
+// }
 
 ////////////
-impl ChunkIter<'_> {
-    pub(crate) fn has_next(&self) -> bool {
-        self.ca.get_index(self.next_index).is_some()
+struct ChunkSlot<'a> {
+    next_chunk_index: usize,
+    arena: &'a ChunkArena,
+}
+pub(crate) struct ChunkCombo<'a> {
+    // invariant: indices in range
+    slots: Vec<ChunkSlot<'a>>,
+    chunks: Vec<&'a [u8]>,
+}
+impl<'a> ChunkCombo<'a> {
+    pub(crate) fn new(arenas: impl Iterator<Item = &'a ChunkArena>) -> Self {
+        Self {
+            chunks: Default::default(),
+            slots: arenas.map(|arena| ChunkSlot { next_chunk_index: 0, arena }).collect(),
+        }
     }
 }
-impl<'a> Iterator for ChunkIter<'a> {
-    type Item = &'a [u8];
-    fn next(&mut self) -> Option<Self::Item> {
-        let res = self.ca.get_index(self.next_index)?;
-        self.next_index += 1;
-        Some(res)
+impl<'a> ChunkCombo<'a> {
+    pub(crate) fn next(&mut self) -> Option<&[&[u8]]> {
+        assert!(!self.slots.is_empty());
+        assert!(self.chunks.is_empty());
+
+        'outer: loop {
+            let slot0 = &self.slots[0];
+            if slot0.arena.len() <= slot0.next_chunk_index {
+                return None;
+            }
+
+            // add remaining chunks
+            for (i, slot) in self.slots[self.chunks.len()..].iter_mut().enumerate() {
+                if let Some(chunk) = slot.arena.get(slot.next_chunk_index) {
+                    self.chunks.push(chunk);
+                    slot.next_chunk_index += 1;
+                } else {
+                    // back up!
+                    for slot in self.slots[(self.chunks.len() + i)..].iter_mut() {
+                        slot.next_chunk_index = 0;
+                    }
+                    self.chunks.pop().expect("previous IF catches this");
+                    continue 'outer;
+                }
+            }
+            break 'outer; // ok!
+        }
+        Some(&self.chunks)
     }
 }
+// impl ChunkIter<'_> {
+//     pub(crate) fn has_next(&self) -> bool {
+//         self.ca.get(self.next_index).is_some()
+//     }
+// }
+// impl<'a> Iterator for ChunkIter<'a> {
+//     type Item = &'a [u8];
+//     fn next(&mut self) -> Option<Self::Item> {
+//         let res = self.ca.get(self.next_index)?;
+//         self.next_index += 1;
+//         Some(res)
+//     }
+// }
 
 impl ChunkArena {
     pub fn new(chunk_bytes: usize) -> Self {
@@ -48,7 +95,7 @@ impl ChunkArena {
                 self.data.set_len(self.data.len() + self.chunk_bytes);
             }
         }
-        Some((self.get_index(index).unwrap(), had))
+        Some((self.get(index).unwrap(), had))
     }
 
     fn check_chunk(&self, chunk: &[u8]) -> bool {
@@ -57,7 +104,7 @@ impl ChunkArena {
     fn len(&self) -> usize {
         self.data.len() / self.chunk_bytes
     }
-    fn get_index(&self, index: usize) -> Option<&[u8]> {
+    fn get(&self, index: usize) -> Option<&[u8]> {
         let start = self.chunk_bytes * index;
         let range = start..(start + self.chunk_bytes);
         if self.data.len() < range.end {
@@ -75,7 +122,7 @@ impl ChunkArena {
         while l < r {
             let m = (l + r) / 2;
             println!("lmr {:?}", [l, m, r]);
-            match chunk_cmp(find, self.get_index(m).unwrap()) {
+            match chunk_cmp(find, self.get(m).unwrap()) {
                 Ordering::Equal => return (m, true),
                 Ordering::Less => r = m,
                 Ordering::Greater => l = m + 1,
@@ -84,9 +131,9 @@ impl ChunkArena {
         }
         return (l, false);
     }
-    pub fn iter(&self) -> ChunkIter {
-        ChunkIter { ca: self, next_index: 0 }
-    }
+    // pub fn iter(&self) -> ChunkIter {
+    //     ChunkIter { ca: self, next_index: 0 }
+    // }
 }
 
 fn chunk_cmp(a: &[u8], b: &[u8]) -> Ordering {

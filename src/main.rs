@@ -1,10 +1,12 @@
 use core::ops::Range;
+use maplit::hashmap;
 use std::collections::HashMap;
 
 mod chunk_arena;
+mod debug;
 mod program;
 
-use chunk_arena::{ChunkArena, ChunkIter};
+use chunk_arena::*;
 
 #[derive(Default, Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
 struct Atom(&'static str);
@@ -79,16 +81,13 @@ struct State {
 ////////////////////////////
 
 impl State {
-    fn generate(&mut self, rule: &StateRule) {
-        let mut var_iters: Vec<ChunkIter> =
-            rule.var_types.iter().map(|tid| self.pos.get(tid).unwrap().iter()).collect();
-        if var_iters.iter().all(ChunkIter::has_next) {
-            for eq_check in rule.eq_checks.iter() {
-                // todo
+    fn generate_all(&mut self) {
+        for state_rule in self.state_rules.iter() {
+            let mut chunk_combo =
+                ChunkCombo::new(state_rule.var_types.iter().map(|tid| self.pos.get(tid).unwrap()));
+            while let Some(chunk_slice) = chunk_combo.next() {
+                println!("{:?}", chunk_slice);
             }
-            // something something advance
-            // build the return result
-            // add it to the set
         }
     }
 }
@@ -112,30 +111,6 @@ impl TypeInfo {
                 }
             }
         }
-    }
-}
-
-impl std::fmt::Debug for Valuation<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let t = self.0.pos.iter().map(|x| (x, 'T'));
-        if let Some(prev_pos) = self.0.prev_pos.as_ref() {
-            let u = prev_pos.set_minus_iter(&self.0.pos).map(|atom| (atom, '?'));
-            f.debug_map().entries(t.chain(u)).finish()
-        } else {
-            let u = None;
-            f.debug_map().entries(t.chain(u)).finish()
-        }
-    }
-}
-
-impl std::fmt::Debug for Atom {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-impl std::fmt::Debug for AtomSet {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.debug_set().entries(self.sorted_vec.iter()).finish()
     }
 }
 
@@ -213,6 +188,16 @@ impl Kb {
 }
 
 fn main() {
+    let mut state = State {
+        state_rules: vec![],
+        pos: hashmap! {
+            // TypeId(0) =>
+        },
+    };
+    state.generate_all();
+}
+
+fn main2() {
     let mut ca = chunk_arena::ChunkArena::new(3);
     println!("{:?}", &ca);
     println!("{:?}", ca.add(&[0, 1, 2]));
@@ -225,7 +210,7 @@ fn main() {
     println!("{:?}", &ca.data);
 }
 
-fn foo() {
+fn main1() {
     let rules = vec![
         Rule {
             head: Atom("other_role_in(amy,r1,a)"),
