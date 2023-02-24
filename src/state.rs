@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
 struct TypeId(u32);
 
 #[derive(Debug)]
@@ -18,6 +18,7 @@ struct ConstTypeDef {
 struct TypeInfo {
     type_defs: HashMap<TypeId, TypeDef>,
     type_size: HashMap<TypeId, usize>, // sum of all
+    closed_types: HashSet<TypeId>,
 }
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum TidSizeErr {
@@ -25,7 +26,8 @@ enum TidSizeErr {
     DependsOnSizeOfUnknown(TypeId),
 }
 
-enum CmpKind {
+#[derive(Debug, Copy, Clone)]
+enum CmpOp {
     Leq,
     Lt,
     Eq,
@@ -34,56 +36,19 @@ enum CmpKind {
 #[derive(Debug, Clone, Copy)]
 struct VarIdx(u8);
 
-#[derive(Debug, Clone)]
-struct VarFrag {
-    var_idx: VarIdx,
-    var_bytes: Range<u16>,
+struct ResInfo {
+    tid: TypeId,
+    res_src: ResSrc,
+    offset: u16,
 }
-#[derive(Debug, Clone)]
-enum FragSource {
+enum ResSrc {
     Const,
-    Var(VarIdx),
-}
-#[derive(Debug, Clone)]
-struct Frag {
-    bytes_range: Range<u16>,
-    source: FragSource,
-}
-struct FragCmpCheck {
-    // assumes ranges are in bounds AND same length
-    frag_a: Frag,
-    frag_b: Frag,
-    cmp_kind: CmpKind,
-}
-struct ReturnInfo {
-    built_range: Range<u16>,
-    tid: TypeId,
-}
-struct LitCheck {
-    frags: Vec<Frag>,
-    tid: TypeId,
-    sign: Sign,
+    Buf,
 }
 struct StateRule {
     var_types: Vec<TypeId>, // will consider all quantifications
-    frag_cmp_checks: Vec<FragCmpCheck>,
-    lit_checks: Vec<LitCheck>,
-    result_tid: TypeId,
-    result_frags: Vec<Frag>,
-}
-struct State {
-    state_rules: Vec<StateRule>,
-    pos: HashMap<TypeId, ChunkArena>,
-    prev_pos: Option<HashMap<TypeId, ChunkArena>>,
-    prev_prev_pos: Option<HashMap<TypeId, ChunkArena>>,
-    const_bytes: Vec<u8>,
-    type_info: TypeInfo,
-}
-struct PrintableStateInterpretation<'a>(&'a State);
-struct PrintableAtom<'a> {
-    state: &'a State,
-    tid: TypeId,
-    chunk: &'a [u8],
+    rule_ins: Vec<RuleIns>,
+    res_info: ResInfo,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -92,14 +57,63 @@ enum Sign {
     Neg,
 }
 
+#[derive(Debug, Copy, Clone)]
+enum FragSrcKind {
+    Const,
+    Buf,
+    Var { var_id: VarIdx },
+}
+#[derive(Debug, Copy, Clone)]
+struct FragSrc {
+    kind: FragSrcKind,
+    offset: u16,
+}
+#[derive(Debug, Copy, Clone)]
+enum ExtendSrc {
+    Var { var_id: VarIdx },
+    Const,
+}
+#[derive(Debug, Clone)]
+enum RuleIns {
+    ExtendBuf { src_range: Range<u16>, src: ExtendSrc },
+    Truncate { new_len: u16 },
+    CheckCmp { frag_srcs: [FragSrc; 2], len: u16, op: CmpOp },
+    LitCheck { sign: Sign, frag_src: FragSrc, tid: TypeId },
+}
+struct StateR {
+    state_rules: Vec<StateRule>,
+    const_bytes: Vec<u8>,
+    type_info: TypeInfo,
+}
+struct State {
+    state_r: StateR,
+    pos: HashMap<TypeId, ChunkArena>,
+    prev_pos: Option<HashMap<TypeId, ChunkArena>>,
+    prev_prev_pos: Option<HashMap<TypeId, ChunkArena>>,
+}
+struct PrintableStateInterpretation<'a>(&'a State);
+struct PrintableAtom<'a> {
+    state: &'a State,
+    tid: TypeId,
+    chunk: &'a [u8],
+}
+
 /////////////////
+impl std::fmt::Debug for TypeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_fmt(format_args!("tid{}", self.0))
+    }
+}
+
 impl TypeId {
     const U08: Self = Self(0);
     const U32: Self = Self(1);
+    const TAG: Self = Self(8);
     const fn const_def(self) -> Option<ConstTypeDef> {
         Some(match self {
             Self::U08 => ConstTypeDef { size: 1, name: "u08" },
-            Self::U32 => ConstTypeDef { size: 5, name: "u32" },
+            Self::U32 => ConstTypeDef { size: 4, name: "u32" },
+            Self::TAG => ConstTypeDef { size: 8, name: "tag" },
             _ => return None,
         })
     }
@@ -132,7 +146,7 @@ impl TypeInfo {
             .or_else(|| self.type_defs.get(&tid).map(|def| def.name))
             .ok_or(())
     }
-    fn new(type_defs: HashMap<TypeId, TypeDef>) -> Result<Self, ()> {
+    fn new(type_defs: HashMap<TypeId, TypeDef>, closed_types: HashSet<TypeId>) -> Result<Self, ()> {
         let mut size_todo: HashSet<TypeId> = type_defs.keys().copied().collect();
         let mut type_size: HashMap<TypeId, usize> = Default::default();
 
@@ -165,37 +179,111 @@ impl TypeInfo {
             }
             return Err(());
         }
-        Ok(Self { type_defs, type_size })
+        Ok(Self { type_defs, type_size, closed_types })
     }
 }
 
-impl VarFrag {
-    fn get_slice<'a>(self, var_chunks: &'a [&'a [u8]]) -> &'a [u8] {
-        // assumes in bounds!
-        &var_chunks[self.var_idx.0 as usize]
-            [self.var_bytes.start as usize..self.var_bytes.end as usize]
+impl FragSrc {
+    fn slice<'a>(
+        self,
+        const_bytes: &'a Vec<u8>,
+        var_chunks: &'a [&'a [u8]],
+        byte_buf: &'a Vec<u8>,
+        len: usize,
+    ) -> &'a [u8] {
+        let FragSrc { offset, kind } = self;
+        let src_slice = match kind {
+            FragSrcKind::Const => const_bytes.as_slice(),
+            FragSrcKind::Buf => byte_buf.as_slice(),
+            FragSrcKind::Var { var_id } => &var_chunks[var_id.0 as usize],
+        };
+        &src_slice[offset as usize..(offset as usize + len)]
     }
 }
-impl State {
-    fn known(&self, sign: Sign, tid: TypeId, chunk: &[u8]) -> Result<bool, WrongSize> {
-        let f = |arenas: &HashMap<TypeId, ChunkArena>| {
-            if let Some(arena) = arenas.get(&tid) {
-                arena.contains(chunk)
-            } else {
-                Ok(false)
+impl StateR {
+    fn execute_ins_prepare_buf(
+        &self,
+        pos: &HashMap<TypeId, ChunkArena>,
+        prev_pos: &Option<HashMap<TypeId, ChunkArena>>,
+        rule_ins: &[RuleIns],
+        var_chunks: &[&[u8]],
+        byte_buf: &mut Vec<u8>,
+    ) -> bool {
+        for instruction in rule_ins.iter().cloned() {
+            match instruction {
+                RuleIns::Truncate { new_len } => byte_buf.truncate(new_len as usize),
+                RuleIns::ExtendBuf { src, src_range } => {
+                    let src_slice = match src {
+                        ExtendSrc::Const => self.const_bytes.as_slice(),
+                        ExtendSrc::Var { var_id } => &var_chunks[var_id.0 as usize],
+                    };
+                    byte_buf.extend(&src_slice[src_range.clone().word_range()])
+                }
+                RuleIns::CheckCmp { frag_srcs: [a, b], len, op } => {
+                    if !op.cmp_check(
+                        a.slice(&self.const_bytes, var_chunks, byte_buf, len as usize),
+                        b.slice(&self.const_bytes, var_chunks, byte_buf, len as usize),
+                    ) {
+                        return false;
+                    }
+                }
+                RuleIns::LitCheck { sign, frag_src: FragSrc { offset, kind }, tid } => {
+                    let src_slice = match kind {
+                        FragSrcKind::Const => self.const_bytes.as_slice(),
+                        FragSrcKind::Buf => byte_buf.as_slice(),
+                        FragSrcKind::Var { var_id } => &var_chunks[var_id.0 as usize],
+                    };
+                    let len = self.type_info.lookup_type_size(tid).expect("IDK this type");
+                    let slice = &src_slice[offset as usize..(offset as usize + len)];
+                    if !self.known(pos, prev_pos, sign, tid, slice).expect("wrong size eh") {
+                        return false;
+                    }
+                }
             }
+        }
+        true
+    }
+    fn known(
+        &self,
+        pos: &HashMap<TypeId, ChunkArena>,
+        prev_pos: &Option<HashMap<TypeId, ChunkArena>>,
+        sign: Sign,
+        tid: TypeId,
+        chunk: &[u8],
+    ) -> Result<bool, WrongSize> {
+        let in_arena = |arenas: &HashMap<TypeId, ChunkArena>| match arenas.get(&tid) {
+            Some(arena) => arena.contains(chunk),
+            None => Ok(false),
         };
         match sign {
-            Sign::Pos => f(&self.pos),
+            Sign::Pos => {
+                // presence of X in existing arena <=> X is KNOWN
+                in_arena(pos)
+            }
             Sign::Neg => {
-                if let Some(arenas) = self.prev_pos.as_ref() {
-                    f(arenas).map(core::ops::Not::not)
+                if let Some(arenas) = prev_pos.as_ref() {
+                    // presence of X in existing arena <=> X is UNKNOWN
+                    in_arena(arenas).map(Not::not)
                 } else {
+                    // lack of an arena altogether <=> X UNKNOWN for all X
                     Ok(false)
                 }
             }
         }
     }
+}
+
+impl CmpOp {
+    fn cmp_check(self, a: &[u8], b: &[u8]) -> bool {
+        match self {
+            Self::Eq => a == b,
+            Self::Neq => a != b,
+            Self::Lt => chunk_cmp(a, b) == Ordering::Less,
+            Self::Leq => chunk_cmp(a, b) != Ordering::Greater,
+        }
+    }
+}
+impl State {
     pub(crate) fn advance(&mut self) {
         self.prev_prev_pos = self.prev_pos.replace(std::mem::take(&mut self.pos));
     }
@@ -206,81 +294,68 @@ impl State {
             false // NOT interested in trivial case of <2 advance() calls
         }
     }
-    fn frag_slice<'a, 'b>(&'a self, frag: &'b Frag, var_chunks: &'a [&'a [u8]]) -> &'a [u8] {
-        &(match frag.source {
-            FragSource::Var(vid) => &var_chunks[vid.0 as usize],
-            FragSource::Const => self.const_bytes.as_slice(),
-        }[frag.bytes_range.word_range()])
+
+    fn add_pos(
+        state_r: &StateR,
+        pos: &mut HashMap<TypeId, ChunkArena>,
+        tid: TypeId,
+        chunk: &[u8],
+    ) -> Result<(), WrongSize> {
+        pos.entry(tid)
+            .or_insert_with(|| {
+                ChunkArena::new(state_r.type_info.type_size.get(&tid).copied().expect("idk fam"))
+            })
+            .insert(chunk)
+            .map(drop)
     }
+
     pub(crate) fn saturate(&mut self) {
         let mut byte_buf: Vec<u8> = vec![];
+        let byte_buf = &mut byte_buf;
+        let Self { state_r, pos, prev_pos, .. } = self;
         'all_rules: loop {
-            'rules: for state_rule in self.state_rules.iter() {
-                let maybe_var_arenas = state_rule.var_types.iter().map(|tid| self.pos.get(tid));
+            'rules: for state_rule in state_r.state_rules.iter() {
+                let maybe_var_arenas = state_rule.var_types.iter().map(|tid| pos.get(tid));
                 if maybe_var_arenas.clone().any(|maybe_arena| maybe_arena.is_none()) {
                     continue 'rules;
                 }
                 let mut var_arenas_combo = ChunkCombo::new(maybe_var_arenas.map(Option::unwrap));
                 'combo: while let Some(var_chunks) = var_arenas_combo.next() {
-                    // cmp checks
-                    for cmp_check in state_rule.frag_cmp_checks.iter() {
-                        let slice_a = self.frag_slice(&cmp_check.frag_a, var_chunks);
-                        let slice_b = self.frag_slice(&cmp_check.frag_b, var_chunks);
-                        let pass = match cmp_check.cmp_kind {
-                            CmpKind::Eq => slice_a == slice_b,
-                            CmpKind::Neq => slice_a != slice_b,
-                            CmpKind::Lt => chunk_cmp(slice_a, slice_b) == Ordering::Less,
-                            CmpKind::Leq => chunk_cmp(slice_a, slice_b) != Ordering::Greater,
-                        };
-                        if !pass {
-                            continue 'combo;
-                        }
-                    }
-                    // lit checks
-                    for lit_check in state_rule.lit_checks.iter() {
-                        byte_buf.clear();
-                        for frag in lit_check.frags.iter() {
-                            byte_buf.extend(self.frag_slice(frag, var_chunks));
-                        }
-                        let known = self
-                            .known(lit_check.sign, lit_check.tid, &byte_buf)
-                            .expect("wrong size??");
-                        println!(
-                            "{:?} {:?} {:?} {:?}",
-                            lit_check.sign, lit_check.tid, &byte_buf, known
-                        );
-                        if !known {
-                            continue 'combo;
-                        }
-                        // whee
-                    }
-                    // results
                     byte_buf.clear();
-                    for frag in state_rule.result_frags.iter() {
-                        byte_buf.extend(self.frag_slice(frag, var_chunks));
+
+                    if !state_r.execute_ins_prepare_buf(
+                        pos,
+                        prev_pos,
+                        &state_rule.rule_ins,
+                        var_chunks,
+                        byte_buf,
+                    ) {
+                        continue 'combo;
                     }
-                    if self
-                        .pos
-                        .get(&state_rule.result_tid)
-                        .map(|arena| arena.contains(&byte_buf).expect("wrong len"))
+
+                    // prepare result, check novelty, and store
+                    let res_len = state_r
+                        .type_info
+                        .lookup_type_size(state_rule.res_info.tid)
+                        .expect("IDK this type");
+                    let result_chunk = {
+                        let src_slice = match state_rule.res_info.res_src {
+                            ResSrc::Const => state_r.const_bytes.as_slice(),
+                            ResSrc::Buf => byte_buf.as_slice(),
+                        };
+                        let offset = state_rule.res_info.offset;
+                        &src_slice[offset as usize..(offset as usize + res_len)]
+                    };
+                    if pos
+                        .get(&state_rule.res_info.tid)
+                        .map(|arena| arena.contains(result_chunk).expect("wrong len"))
                         .unwrap_or(false)
                     {
                         println!("lol nevermind. already get this result");
                     } else {
-                        println!("new result! {:?} {:?}", state_rule.result_tid, &byte_buf);
-                        self.pos
-                            .entry(state_rule.result_tid)
-                            .or_insert_with(|| {
-                                ChunkArena::new(
-                                    self.type_info
-                                        .type_size
-                                        .get(&state_rule.result_tid)
-                                        .copied()
-                                        .expect("idk fam"),
-                                )
-                            })
-                            .insert(&byte_buf)
-                            .unwrap();
+                        println!("new result! {:?} {:?}", state_rule.res_info.tid, result_chunk);
+                        Self::add_pos(state_r, pos, state_rule.res_info.tid, result_chunk)
+                            .expect("wrong size??");
                         continue 'all_rules;
                     }
                 }
@@ -293,17 +368,23 @@ impl std::fmt::Debug for PrintableAtom<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let maybe_fields = self
             .state
+            .state_r
             .type_info
             .lookup_type_fields(self.tid)
             .expect(&format!("idk your fields {:?}", self.tid));
         if let Some(fields) = maybe_fields {
-            let name = self.state.type_info.lookup_type_name(self.tid).expect("idk this name");
+            let name =
+                self.state.state_r.type_info.lookup_type_name(self.tid).expect("idk this name");
             let mut d = f.debug_tuple(name);
             let d = &mut d;
             let mut offset = 0;
             for &field in fields {
-                let field_size =
-                    self.state.type_info.lookup_type_size(field).expect("idk this field size");
+                let field_size = self
+                    .state
+                    .state_r
+                    .type_info
+                    .lookup_type_size(field)
+                    .expect("idk this field size");
                 let offset2 = offset + field_size;
                 let field_chunk = &self.chunk[offset..offset2];
                 offset = offset2;
@@ -311,7 +392,14 @@ impl std::fmt::Debug for PrintableAtom<'_> {
             }
             d.finish()
         } else {
-            self.chunk.fmt(f)
+            match self.tid {
+                TypeId::U08 | TypeId::U32 => self.chunk.fmt(f),
+                TypeId::TAG => f.write_fmt(format_args!(
+                    "{}",
+                    std::str::from_utf8(self.chunk).map(str::trim).unwrap_or("?")
+                )),
+                _ => unreachable!(),
+            }
         }
     }
 }
@@ -344,97 +432,60 @@ impl std::fmt::Debug for PrintableStateInterpretation<'_> {
 }
 
 pub(crate) fn test() {
-    let type_info = TypeInfo::new(hashmap! {
-        TypeId(5) => TypeDef { name: "person", fields: vec![TypeId::U08], },
-        TypeId(6) => TypeDef { name: "friend", fields: vec![TypeId(5), TypeId(5)], },
-    })
+    let type_info = TypeInfo::new(
+        hashmap! {
+            TypeId(5) => TypeDef { name: "person", fields: vec![TypeId::U08], },
+            TypeId(6) => TypeDef { name: "friend", fields: vec![TypeId(5), TypeId(5)], },
+            TypeId(7) => TypeDef { name: "cool-person", fields: vec![TypeId(5)] },
+        },
+        hashset! {},
+    )
     .expect("weh");
     println!("{:#?}", &type_info);
     // return;
     let mut state = State {
-        type_info,
-        state_rules: vec![
-            // "42u8 is a person"
-            // StateRule {
-            //     var_types: vec![],
-            //     frag_cmp_checks: vec![],
-            //     lit_checks: vec![],
-            //     result_tid: TypeId(5),
-            //     result_frags: vec![Frag { bytes_range: 0..1, source: FragSource::Const }],
-            // },
-            // "c <="
-            StateRule {
-                var_types: vec![],
-                frag_cmp_checks: vec![],
-                lit_checks: vec![],
-                result_tid: TypeId(5),
-                result_frags: vec![Frag { bytes_range: 2..3, source: FragSource::Const }],
-            },
-            // "b <= !a"
-            StateRule {
-                var_types: vec![],
-                frag_cmp_checks: vec![],
-                lit_checks: vec![LitCheck {
-                    frags: vec![Frag { bytes_range: 0..1, source: FragSource::Const }],
-                    tid: TypeId(5),
-                    sign: Sign::Neg,
-                }],
-                result_tid: TypeId(5),
-                result_frags: vec![Frag { bytes_range: 1..2, source: FragSource::Const }],
-            },
-            // "a <= c, !b"
-            StateRule {
-                var_types: vec![],
-                frag_cmp_checks: vec![],
-                lit_checks: vec![
-                    LitCheck {
-                        frags: vec![Frag { bytes_range: 2..3, source: FragSource::Const }],
-                        tid: TypeId(5),
-                        sign: Sign::Pos,
-                    },
-                    LitCheck {
-                        frags: vec![Frag { bytes_range: 1..2, source: FragSource::Const }],
+        state_r: StateR {
+            type_info,
+            state_rules: vec![
+                // person(0) :- person(2), !person(1).
+                StateRule {
+                    var_types: vec![],
+                    rule_ins: vec![
+                        RuleIns::LitCheck {
+                            tid: TypeId(5),
+                            sign: Sign::Pos,
+                            frag_src: FragSrc { offset: 2, kind: FragSrcKind::Const },
+                        },
+                        RuleIns::LitCheck {
+                            tid: TypeId(5),
+                            sign: Sign::Neg,
+                            frag_src: FragSrc { offset: 1, kind: FragSrcKind::Const },
+                        },
+                    ],
+                    res_info: ResInfo { res_src: ResSrc::Const, tid: TypeId(5), offset: 0 },
+                },
+                // person(1) :- !person(0).
+                StateRule {
+                    var_types: vec![],
+                    rule_ins: vec![RuleIns::LitCheck {
                         tid: TypeId(5),
                         sign: Sign::Neg,
-                    },
-                ],
-                result_tid: TypeId(5),
-                result_frags: vec![Frag { bytes_range: 0..1, source: FragSource::Const }],
-            },
-            // every person is their own friend
-            // StateRule {
-            //     var_types: vec![TypeId(5)],
-            //     frag_cmp_checks: vec![],
-            //     lit_checks: vec![],
-            //     result_tid: TypeId(6),
-            //     result_frags: vec![
-            //         Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
-            //         Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
-            //     ],
-            // },
-            // StateRule {
-            //     var_types: vec![TypeId(0), TypeId(1)],
-            //     frag_cmp_checks: vec![
-            //         FragCmpCheck {
-            //             frag_a: Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
-            //             frag_b: Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(1)) },
-            //             cmp_kind: CmpKind::Leq,
-            //         }, // whee
-            //     ],
-            //     lit_checks: vec![],
-            //     result_tid: TypeId(2),
-            //     result_frags: vec![
-            //         Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
-            //         Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(0)) },
-            //         Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(1)) },
-            //         Frag { bytes_range: 0..1, source: FragSource::Var(VarIdx(1)) },
-            //     ],
-            // }, //whee
-        ],
+                        frag_src: FragSrc { offset: 0, kind: FragSrcKind::Const },
+                    }],
+                    res_info: ResInfo { res_src: ResSrc::Const, tid: TypeId(5), offset: 1 },
+                },
+                // person(2).
+                StateRule {
+                    var_types: vec![],
+                    rule_ins: vec![],
+                    res_info: ResInfo { res_src: ResSrc::Const, tid: TypeId(5), offset: 2 },
+                },
+            ],
+            const_bytes: vec![0, 1, 2],
+        },
         pos: Default::default(),
         prev_pos: None,
         prev_prev_pos: None,
-        const_bytes: vec![11u8, 22u8, 33u8],
     };
     let mut iterations = 0;
     loop {
@@ -457,7 +508,7 @@ pub(crate) fn test() {
     println!("iterations {:?}", iterations);
     println!("SOLUTION {:?}", PrintableStateInterpretation(&state));
     // state.saturate();
-    println!("POS {:#?}\nPREV_POS {:?}", &state.pos, &state.prev_pos);
+    println!("POS {:?}\nPREV_POS {:?}", &state.pos, &state.prev_pos);
     // state.saturate();
     // println!("{:#?}", &state.pos);
 }

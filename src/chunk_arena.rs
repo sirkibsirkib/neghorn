@@ -1,7 +1,7 @@
 use crate::chunk_cmp;
 use core::cmp::Ordering;
 
-#[derive(Debug, Eq)]
+#[derive(Eq)]
 pub(crate) struct ChunkArena {
     data: Vec<u8>,
     chunk_bytes: usize,
@@ -30,6 +30,13 @@ pub(crate) struct WrongSize {
     expected: usize,
 }
 ////////////
+
+impl std::fmt::Debug for ChunkArena {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_set().entries(self.iter()).finish()
+    }
+}
+
 impl<'a> Iterator for ChunkIter<'a> {
     type Item = &'a [u8];
     fn next(&mut self) -> Option<Self::Item> {
