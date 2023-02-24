@@ -25,13 +25,3 @@ struct Program {
     seals: HashSet<String>,
     rules: Vec<Rule>,
 }
-
-//////////////
-
-// use nom::{
-//   bytes::complete::{tag, take_while_m_n},
-//   character::complete::alpha0,
-//   combinator::{map, map_res},
-//   sequence::tuple,
-//   IResult,
-// };

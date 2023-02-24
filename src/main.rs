@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 mod chunk_arena;
 // mod old_kb;
 // mod program;
+mod fmt;
 mod state;
 
 use chunk_arena::{ChunkArena, ChunkCombo, WrongSize};
