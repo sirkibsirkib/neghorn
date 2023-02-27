@@ -180,6 +180,10 @@ impl TypeMap {
                             .unwrap();
                         // update size, prolong the loop, don't retain this TID.
                         maybe_fields_maybe_size.maybe_size = maybe_size;
+                        // assert!(
+                        //     maybe_size != Some(0),
+                        //     "implementation cannot handle no-data prods"
+                        // );
                         progress = true;
                         false
                     } else {

@@ -5,6 +5,7 @@ use core::cmp::Ordering;
 pub(crate) struct ChunkArena {
     data: Vec<u8>,
     chunk_bytes: usize,
+    zero_len_and_full: bool,
 }
 
 pub(crate) struct ChunkIter<'a> {
@@ -118,14 +119,22 @@ impl ChunkArena {
         me
     }
     pub fn new(chunk_bytes: usize) -> Self {
-        Self { data: Default::default(), chunk_bytes }
+        Self { data: Default::default(), chunk_bytes, zero_len_and_full: false }
     }
     pub fn contains(&self, chunk: &[u8]) -> Result<bool, WrongSize> {
-        self.check_chunk(chunk)?;
+        self.check_chunk_len(chunk)?;
+        if self.chunk_bytes == 0 {
+            return Ok(self.zero_len_and_full);
+        }
         Ok(self.binary_search(chunk).1)
     }
     pub fn insert(&mut self, chunk: &[u8]) -> Result<(&[u8], bool), WrongSize> {
-        self.check_chunk(chunk)?;
+        self.check_chunk_len(chunk)?;
+        if self.chunk_bytes == 0 {
+            let ret = !self.zero_len_and_full;
+            self.zero_len_and_full = true;
+            return Ok((&[], ret));
+        }
         let (index, had) = self.binary_search(chunk);
         if !had {
             // insert!
@@ -144,7 +153,7 @@ impl ChunkArena {
         Ok((self.get_index(index).unwrap(), had))
     }
 
-    fn check_chunk(&self, chunk: &[u8]) -> Result<(), WrongSize> {
+    fn check_chunk_len(&self, chunk: &[u8]) -> Result<(), WrongSize> {
         if self.chunk_bytes != chunk.len() {
             return Err(WrongSize { given: chunk.len(), expected: self.chunk_bytes });
         } else {
@@ -156,6 +165,9 @@ impl ChunkArena {
     }
     // fn contains(&self, chunk)
     fn get_index(&self, index: usize) -> Option<&[u8]> {
+        if self.chunk_bytes == 0 {
+            return if self.zero_len_and_full && index == 0 { Some(&[]) } else { None };
+        }
         let start = self.chunk_bytes * index;
         let range = start..(start + self.chunk_bytes);
         if self.data.len() < range.end {
@@ -165,6 +177,7 @@ impl ChunkArena {
         }
     }
     fn binary_search(&self, find: &[u8]) -> (usize, bool) {
+        // NOT DESIGNED FOR self.chunk_bytes == 0
         if self.data.is_empty() {
             return (0, false);
         }
@@ -180,9 +193,6 @@ impl ChunkArena {
         }
         return (l, false);
     }
-    // pub fn iter(&self) -> ChunkIter {
-    //     ChunkIter { ca: self, next_index: 0 }
-    // }
 }
 
 pub(crate) fn test() {
@@ -196,4 +206,13 @@ pub(crate) fn test() {
     println!("{:?}", &ca.data);
     println!("{:?}", ca.insert(&[3, 1, 1]));
     println!("{:?}", &ca.data);
+}
+
+pub(crate) fn zero_len_test() {
+    let mut ca = ChunkArena::from_slice::<0>([].iter());
+    println!("{:?}", &ca);
+    ca.insert(&[]).expect("ok");
+    println!("{:?}", &ca);
+    ca.insert(&[]).expect("ok");
+    println!("{:?}", &ca);
 }

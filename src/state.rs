@@ -372,6 +372,40 @@ pub(crate) fn test() {
                     ],
                     res_info: ResInfo { res_src: ResSrc::Buf, tid: YES, offset: 0 },
                 },
+                // no(P,R1) :-  yes(P,R1), no(P,R2), R1<R2.
+                StateRule {
+                    var_types: vec![NO, YES],
+                    rule_ins: vec![
+                        RuleIns::CheckCmp {
+                            frag_srcs: [
+                                FragSrc { kind: FragSrcKind::Var { var_id: VarIdx(1) }, offset: 0 },
+                                FragSrc { kind: FragSrcKind::Var { var_id: VarIdx(0) }, offset: 0 },
+                            ],
+                            len: 1,
+                            op: CmpOp::Lt,
+                        }, // wah
+                        RuleIns::ExtendBuf {
+                            src_range: 0..1,
+                            extend_src: ExtendSrc::Var { var_id: VarIdx(1) },
+                        }, // wah
+                    ],
+                    res_info: ResInfo { res_src: ResSrc::Buf, tid: NO, offset: 0 },
+                },
+                // permitted(P) :- yes(P,R), ~no(P,R)
+                StateRule {
+                    var_types: vec![YES],
+                    rule_ins: vec![
+                        RuleIns::LitCheck {
+                            sign: Sign::Neg,
+                            tid: NO,
+                            frag_src: FragSrc {
+                                kind: FragSrcKind::Var { var_id: state::VarIdx(0) },
+                                offset: 0,
+                            },
+                        }, // wah
+                    ],
+                    res_info: ResInfo { res_src: ResSrc::Buf, tid: PERMITTED, offset: 0 },
+                },
                 // no(processing(),rank(20)).
                 StateRule {
                     var_types: vec![],

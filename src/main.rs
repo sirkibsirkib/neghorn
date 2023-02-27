@@ -36,4 +36,5 @@ fn chunk_cmp(a: &[u8], b: &[u8]) -> Ordering {
 
 fn main() {
     state::test();
+    // chunk_arena::zero_len_test();
 }
