@@ -1,31 +1,5 @@
 use super::*;
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
-struct TypeId(u32);
-
-#[derive(Debug)]
-struct TypeDef {
-    name: &'static str,
-    fields: Vec<TypeId>,
-}
-
-struct ConstTypeDef {
-    name: &'static str,
-    size: usize,
-}
-
-#[derive(Debug)]
-struct TypeInfo {
-    type_defs: HashMap<TypeId, TypeDef>,
-    type_size: HashMap<TypeId, usize>, // sum of all
-    closed_types: HashSet<TypeId>,
-}
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum TidSizeErr {
-    RecursiveDepthExceeded,
-    DependsOnSizeOfUnknown(TypeId),
-}
-
 #[derive(Debug, Copy, Clone)]
 enum CmpOp {
     Leq,
@@ -36,15 +10,18 @@ enum CmpOp {
 #[derive(Debug, Clone, Copy)]
 struct VarIdx(u8);
 
+#[derive(Debug)]
 struct ResInfo {
     tid: TypeId,
     res_src: ResSrc,
     offset: u16,
 }
+#[derive(Debug)]
 enum ResSrc {
     Const,
     Buf,
 }
+#[derive(Debug)]
 struct StateRule {
     var_types: Vec<TypeId>, // will consider all quantifications
     rule_ins: Vec<RuleIns>,
@@ -75,16 +52,18 @@ enum ExtendSrc {
 }
 #[derive(Debug, Clone)]
 enum RuleIns {
-    ExtendBuf { src_range: Range<u16>, src: ExtendSrc },
+    ExtendBuf { src_range: Range<u16>, extend_src: ExtendSrc },
     Truncate { new_len: u16 },
     CheckCmp { frag_srcs: [FragSrc; 2], len: u16, op: CmpOp },
     LitCheck { sign: Sign, frag_src: FragSrc, tid: TypeId },
 }
+#[derive(Debug)]
 struct StateR {
     state_rules: Vec<StateRule>,
     const_bytes: Vec<u8>,
-    type_info: TypeInfo,
+    type_map: TypeMap,
 }
+#[derive(Debug)]
 struct State {
     state_r: StateR,
     pos: HashMap<TypeId, ChunkArena>,
@@ -99,89 +78,6 @@ struct PrintableAtom<'a> {
 }
 
 /////////////////
-impl std::fmt::Debug for TypeId {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.write_fmt(format_args!("tid{}", self.0))
-    }
-}
-
-impl TypeId {
-    const U08: Self = Self(0);
-    const U32: Self = Self(1);
-    const TAG: Self = Self(8);
-    const fn const_def(self) -> Option<ConstTypeDef> {
-        Some(match self {
-            Self::U08 => ConstTypeDef { size: 1, name: "u08" },
-            Self::U32 => ConstTypeDef { size: 4, name: "u32" },
-            Self::TAG => ConstTypeDef { size: 8, name: "tag" },
-            _ => return None,
-        })
-    }
-}
-impl ConstTypeDef {
-    fn size(self) -> usize {
-        self.size
-    }
-    fn name(self) -> &'static str {
-        self.name
-    }
-}
-impl TypeInfo {
-    fn lookup_type_size(&self, tid: TypeId) -> Result<usize, ()> {
-        tid.const_def()
-            .map(ConstTypeDef::size)
-            .or_else(|| self.type_size.get(&tid).copied())
-            .ok_or(())
-    }
-    fn lookup_type_fields(&self, tid: TypeId) -> Result<Option<&[TypeId]>, ()> {
-        if tid.const_def().is_some() {
-            Ok(None)
-        } else {
-            self.type_defs.get(&tid).map(|def| Some(def.fields.as_slice())).ok_or(())
-        }
-    }
-    fn lookup_type_name(&self, tid: TypeId) -> Result<&'static str, ()> {
-        tid.const_def()
-            .map(ConstTypeDef::name)
-            .or_else(|| self.type_defs.get(&tid).map(|def| def.name))
-            .ok_or(())
-    }
-    fn new(type_defs: HashMap<TypeId, TypeDef>, closed_types: HashSet<TypeId>) -> Result<Self, ()> {
-        let mut size_todo: HashSet<TypeId> = type_defs.keys().copied().collect();
-        let mut type_size: HashMap<TypeId, usize> = Default::default();
-
-        // invariant: type_size.keys() disjoint with size_todo.
-        const MAX_DEPTH: u8 = 100;
-
-        'arb: while let Some(mut tid) = size_todo.iter().copied().next() {
-            'tid_compute: for _ in 0..MAX_DEPTH {
-                assert!(tid.const_def().is_none());
-                let def = type_defs.get(&tid).ok_or(())?;
-                let r: Result<usize, TypeId> = def.fields.iter().fold(Ok(0), |acc, field| {
-                    Ok(acc?
-                        + field
-                            .const_def()
-                            .map(ConstTypeDef::size)
-                            .or_else(|| type_size.get(field).copied())
-                            .ok_or(*field)?)
-                });
-                match r {
-                    Ok(size) => {
-                        size_todo.remove(&tid);
-                        type_size.insert(tid, size);
-                        continue 'arb;
-                    }
-                    Err(field) => {
-                        tid = field;
-                        continue 'tid_compute;
-                    }
-                };
-            }
-            return Err(());
-        }
-        Ok(Self { type_defs, type_size, closed_types })
-    }
-}
 
 impl FragSrc {
     fn slice<'a>(
@@ -212,8 +108,8 @@ impl StateR {
         for instruction in rule_ins.iter().cloned() {
             match instruction {
                 RuleIns::Truncate { new_len } => byte_buf.truncate(new_len as usize),
-                RuleIns::ExtendBuf { src, src_range } => {
-                    let src_slice = match src {
+                RuleIns::ExtendBuf { extend_src, src_range } => {
+                    let src_slice = match extend_src {
                         ExtendSrc::Const => self.const_bytes.as_slice(),
                         ExtendSrc::Var { var_id } => &var_chunks[var_id.0 as usize],
                     };
@@ -233,7 +129,7 @@ impl StateR {
                         FragSrcKind::Buf => byte_buf.as_slice(),
                         FragSrcKind::Var { var_id } => &var_chunks[var_id.0 as usize],
                     };
-                    let len = self.type_info.lookup_type_size(tid).expect("IDK this type");
+                    let len = self.type_map.lookup_type_size(tid).expect("IDK this type");
                     let slice = &src_slice[offset as usize..(offset as usize + len)];
                     if !self.known(pos, prev_pos, sign, tid, slice).expect("wrong size eh") {
                         return false;
@@ -303,7 +199,7 @@ impl State {
     ) -> Result<(), WrongSize> {
         pos.entry(tid)
             .or_insert_with(|| {
-                ChunkArena::new(state_r.type_info.type_size.get(&tid).copied().expect("idk fam"))
+                ChunkArena::new(state_r.type_map.lookup_type_size(tid).expect("idk fam"))
             })
             .insert(chunk)
             .map(drop)
@@ -334,8 +230,9 @@ impl State {
                     }
 
                     // prepare result, check novelty, and store
+                    let res_tid = state_rule.res_info.tid;
                     let res_len = state_r
-                        .type_info
+                        .type_map
                         .lookup_type_size(state_rule.res_info.tid)
                         .expect("IDK this type");
                     let result_chunk = {
@@ -347,15 +244,22 @@ impl State {
                         &src_slice[offset as usize..(offset as usize + res_len)]
                     };
                     if pos
-                        .get(&state_rule.res_info.tid)
+                        .get(&res_tid)
                         .map(|arena| arena.contains(result_chunk).expect("wrong len"))
                         .unwrap_or(false)
                     {
                         println!("lol nevermind. already get this result");
                     } else {
-                        println!("new result! {:?} {:?}", state_rule.res_info.tid, result_chunk);
-                        Self::add_pos(state_r, pos, state_rule.res_info.tid, result_chunk)
-                            .expect("wrong size??");
+                        println!("new result! {:?} {:?}", res_tid, result_chunk);
+                        pos.entry(res_tid)
+                            .or_insert_with(|| {
+                                ChunkArena::new(
+                                    state_r.type_map.lookup_type_size(res_tid).expect("idk fam"),
+                                )
+                            })
+                            .insert(result_chunk)
+                            .map(drop)
+                            .expect("wahey");
                         continue 'all_rules;
                     }
                 }
@@ -366,15 +270,26 @@ impl State {
 }
 impl std::fmt::Debug for PrintableAtom<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self.tid {
+            TypeId::U08 | TypeId::U32 => return self.chunk.fmt(f),
+            // TypeId::TAG => {
+            //     return f.write_fmt(format_args!(
+            //         "{}",
+            //         std::str::from_utf8(self.chunk).map(str::trim).unwrap_or("?")
+            //     ))
+            // }
+            _prod_tid => {}
+        }
+
+        let name = self.state.state_r.type_map.lookup_type_name(self.tid).expect("idk this name");
+
         let maybe_fields = self
             .state
             .state_r
-            .type_info
-            .lookup_type_fields(self.tid)
+            .type_map
+            .lookup_maybe_fields(self.tid)
             .expect(&format!("idk your fields {:?}", self.tid));
         if let Some(fields) = maybe_fields {
-            let name =
-                self.state.state_r.type_info.lookup_type_name(self.tid).expect("idk this name");
             let mut d = f.debug_tuple(name);
             let d = &mut d;
             let mut offset = 0;
@@ -382,7 +297,7 @@ impl std::fmt::Debug for PrintableAtom<'_> {
                 let field_size = self
                     .state
                     .state_r
-                    .type_info
+                    .type_map
                     .lookup_type_size(field)
                     .expect("idk this field size");
                 let offset2 = offset + field_size;
@@ -392,14 +307,7 @@ impl std::fmt::Debug for PrintableAtom<'_> {
             }
             d.finish()
         } else {
-            match self.tid {
-                TypeId::U08 | TypeId::U32 => self.chunk.fmt(f),
-                TypeId::TAG => f.write_fmt(format_args!(
-                    "{}",
-                    std::str::from_utf8(self.chunk).map(str::trim).unwrap_or("?")
-                )),
-                _ => unreachable!(),
-            }
+            f.write_fmt(format_args!("{}", name))
         }
     }
 }
@@ -432,61 +340,58 @@ impl std::fmt::Debug for PrintableStateInterpretation<'_> {
 }
 
 pub(crate) fn test() {
-    let type_info = TypeInfo::new(
-        hashmap! {
-            TypeId(5) => TypeDef { name: "person", fields: vec![TypeId::U08], },
-            TypeId(6) => TypeDef { name: "friend", fields: vec![TypeId(5), TypeId(5)], },
-            TypeId(7) => TypeDef { name: "cool-person", fields: vec![TypeId(5)] },
-        },
-        hashset! {},
-    )
+    const PROCESSING: TypeId = TypeId(4);
+    const RANK: TypeId = TypeId(5);
+    const YES: TypeId = TypeId(6);
+    const NO: TypeId = TypeId(7);
+    const PERMITTED: TypeId = TypeId(8);
+    let type_map = TypeMap::new(hashmap! {
+        PROCESSING => ProdDef { name: "processing", maybe_fields: Some(vec![]), },
+        RANK => ProdDef { name: "rank", maybe_fields: Some(vec![TypeId::U08]), },
+        YES => ProdDef { name: "yes", maybe_fields: Some(vec![PROCESSING, RANK]), },
+        NO => ProdDef { name: "no", maybe_fields: Some(vec![PROCESSING, RANK]), },
+        PERMITTED => ProdDef { name: "permitted", maybe_fields: Some(vec![PROCESSING]), },
+    })
     .expect("weh");
-    println!("{:#?}", &type_info);
-    // return;
+    println!("{:#?}", &type_map);
     let mut state = State {
         state_r: StateR {
-            type_info,
+            type_map,
             state_rules: vec![
-                // person(0) :- person(2), !person(1).
+                // yes(P,R1) :-  no(P,R1), yes(P,R2), R1<R2.
                 StateRule {
-                    var_types: vec![],
+                    var_types: vec![YES, NO],
                     rule_ins: vec![
-                        RuleIns::LitCheck {
-                            tid: TypeId(5),
-                            sign: Sign::Pos,
-                            frag_src: FragSrc { offset: 2, kind: FragSrcKind::Const },
-                        },
-                        RuleIns::LitCheck {
-                            tid: TypeId(5),
-                            sign: Sign::Neg,
-                            frag_src: FragSrc { offset: 1, kind: FragSrcKind::Const },
-                        },
+                        RuleIns::CheckCmp {
+                            frag_srcs: [
+                                FragSrc { kind: FragSrcKind::Var { var_id: VarIdx(0) }, offset: 0 },
+                                FragSrc { kind: FragSrcKind::Var { var_id: VarIdx(1) }, offset: 0 },
+                            ],
+                            len: 1,
+                            op: CmpOp::Lt,
+                        }, // wah
+                        RuleIns::ExtendBuf {
+                            src_range: 0..1,
+                            extend_src: ExtendSrc::Var { var_id: VarIdx(1) },
+                        }, // wah
                     ],
-                    res_info: ResInfo { res_src: ResSrc::Const, tid: TypeId(5), offset: 0 },
+                    res_info: ResInfo { res_src: ResSrc::Buf, tid: YES, offset: 0 },
                 },
-                // person(1) :- !person(0).
-                StateRule {
-                    var_types: vec![],
-                    rule_ins: vec![RuleIns::LitCheck {
-                        tid: TypeId(5),
-                        sign: Sign::Neg,
-                        frag_src: FragSrc { offset: 0, kind: FragSrcKind::Const },
-                    }],
-                    res_info: ResInfo { res_src: ResSrc::Const, tid: TypeId(5), offset: 1 },
-                },
-                // person(2).
+                // yes(processing(),rank(0)).
                 StateRule {
                     var_types: vec![],
                     rule_ins: vec![],
-                    res_info: ResInfo { res_src: ResSrc::Const, tid: TypeId(5), offset: 2 },
+                    res_info: ResInfo { res_src: ResSrc::Const, tid: YES, offset: 0 },
                 },
             ],
-            const_bytes: vec![0, 1, 2],
+            const_bytes: vec![0, 1],
         },
         pos: Default::default(),
         prev_pos: None,
         prev_prev_pos: None,
     };
+    println!("{:#?}", &state);
+
     let mut iterations = 0;
     loop {
         // println!("ADVANCED {:#?}", &kb);

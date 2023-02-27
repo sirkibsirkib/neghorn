@@ -1,15 +1,16 @@
 use core::cmp::Ordering;
 use core::ops::{Not, Range};
 use maplit::{hashmap, hashset};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 mod chunk_arena;
 // mod old_kb;
 // mod program;
-mod fmt;
 mod state;
+mod types;
 
 use chunk_arena::{ChunkArena, ChunkCombo, WrongSize};
+use types::*;
 
 trait WordRange {
     fn word_range(&self) -> Range<usize>;
