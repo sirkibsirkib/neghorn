@@ -217,6 +217,7 @@ impl State {
                 }
                 let mut var_arenas_combo = ChunkCombo::new(maybe_var_arenas.map(Option::unwrap));
                 'combo: while let Some(var_chunks) = var_arenas_combo.next() {
+                    println!("Rule with var chunks: {:?}", var_chunks);
                     byte_buf.clear();
 
                     if !state_r.execute_ins_prepare_buf(
@@ -272,12 +273,6 @@ impl std::fmt::Debug for PrintableAtom<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self.tid {
             TypeId::U08 | TypeId::U32 => return self.chunk.fmt(f),
-            // TypeId::TAG => {
-            //     return f.write_fmt(format_args!(
-            //         "{}",
-            //         std::str::from_utf8(self.chunk).map(str::trim).unwrap_or("?")
-            //     ))
-            // }
             _prod_tid => {}
         }
 
@@ -364,8 +359,8 @@ pub(crate) fn test() {
                     rule_ins: vec![
                         RuleIns::CheckCmp {
                             frag_srcs: [
-                                FragSrc { kind: FragSrcKind::Var { var_id: VarIdx(0) }, offset: 0 },
                                 FragSrc { kind: FragSrcKind::Var { var_id: VarIdx(1) }, offset: 0 },
+                                FragSrc { kind: FragSrcKind::Var { var_id: VarIdx(0) }, offset: 0 },
                             ],
                             len: 1,
                             op: CmpOp::Lt,
@@ -377,14 +372,20 @@ pub(crate) fn test() {
                     ],
                     res_info: ResInfo { res_src: ResSrc::Buf, tid: YES, offset: 0 },
                 },
-                // yes(processing(),rank(0)).
+                // no(processing(),rank(20)).
                 StateRule {
                     var_types: vec![],
                     rule_ins: vec![],
-                    res_info: ResInfo { res_src: ResSrc::Const, tid: YES, offset: 0 },
+                    res_info: ResInfo { res_src: ResSrc::Const, tid: NO, offset: 0 },
+                },
+                // yes(processing(),rank(30)).
+                StateRule {
+                    var_types: vec![],
+                    rule_ins: vec![],
+                    res_info: ResInfo { res_src: ResSrc::Const, tid: YES, offset: 1 },
                 },
             ],
-            const_bytes: vec![0, 1],
+            const_bytes: vec![20, 30],
         },
         pos: Default::default(),
         prev_pos: None,
